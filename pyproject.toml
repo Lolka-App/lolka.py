@@ -1,0 +1,141 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lolka.py"
+description = "A Python wrapper for the lolka bot API (discord.py-compatible fork)"
+readme = { file = "README.rst", content-type = "text/x-rst" }
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+authors = [{ name = "lolka" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+    "Typing :: Typed",
+]
+dynamic = ["version", "dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/Lolka-App/lolka.py"
+"Issue tracker" = "https://github.com/Lolka-App/lolka.py/issues"
+"Upstream (discord.py)" = "https://github.com/Rapptz/discord.py"
+
+[tool.setuptools.dynamic]
+dependencies = { file = "requirements.txt" }
+
+[project.optional-dependencies]
+# lolka voice использует WebRTC (как клиенты lolka), а не Discord-voice/libsodium:
+# aiortc даёт ICE/DTLS-SRTP и Opus, pymediasoup — клиентскую сторону mediasoup-сигналинга.
+voice = [
+    "aiortc>=1.9.0",
+    "pymediasoup>=0.2.4",
+]
+docs = [
+    "sphinx==4.4.0",
+    "sphinxcontrib_trio==1.1.2",
+    # TODO: bump these when migrating to a newer Sphinx version
+    "sphinxcontrib-websupport==1.2.4",
+    "sphinxcontrib-applehelp==1.0.4",
+    "sphinxcontrib-devhelp==1.0.2",
+    "sphinxcontrib-htmlhelp==2.0.1",
+    "sphinxcontrib-jsmath==1.0.1",
+    "sphinxcontrib-qthelp==1.0.3",
+    "sphinxcontrib-serializinghtml==1.1.5",
+    "typing-extensions>=4.3,<5",
+    "sphinx-inline-tabs==2023.4.21",
+    # TODO: Remove this when moving to Sphinx >= 6.6
+    "imghdr-lts==1.0.0; python_version>='3.13'",
+]
+speed = [
+    "orjson>=3.5.4",
+    "aiodns>=1.1; sys_platform != 'win32'",
+    "Brotli",
+    "cchardet==2.1.7; python_version < '3.10'",
+    "zstandard>=0.23.0; python_version <= '3.13'"
+]
+test = [
+    "coverage[toml]",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "pytest-mock",
+    "typing-extensions>=4.3,<5",
+    "tzdata; sys_platform == 'win32'",
+]
+dev = [
+    "ruff==0.12",
+    "typing_extensions>=4.3,<5",
+]
+
+[tool.setuptools]
+packages = [
+    "lolka",
+    "lolka.types",
+    "lolka.ui",
+    "lolka.webhook",
+    "lolka.app_commands",
+    "lolka.ext.commands",
+    "lolka.ext.tasks",
+]
+include-package-data = true
+
+[tool.ruff]
+line-length = 125
+extend-exclude = ["docs", "tests"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.ruff.format]
+line-ending = "lf"
+quote-style = "single"
+
+[tool.coverage.run]
+omit = [
+    "lolka/__main__.py",
+    "lolka/types/*",
+    "*/_types.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "@overload",
+]
+
+[tool.pyright]
+include = [
+    "lolka",
+    "lolka/app_commands",
+    "lolka/types",
+    "lolka/ui",
+    "lolka/ext",
+    "lolka/ext/commands",
+    "lolka/ext/tasks",
+]
+exclude = [
+    "**/__pycache__",
+    "build",
+    "dist",
+    "docs",
+]
+reportUnnecessaryTypeIgnoreComment = "warning"
+reportUnusedImport = "error"
+pythonVersion = "3.8"
+typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
