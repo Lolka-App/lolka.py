@@ -125,6 +125,16 @@ DEFAULT_FILE_SIZE_LIMIT_BYTES = 10485760
 TIMESTAMP_PATTERN: re.Pattern[str] = re.compile(r'<t:(-?\d+)(?::[tTdDfFsSR])?>')
 
 
+def _lolka_default_avatar_index(id: int, /) -> int:
+    """FNV-1a хеш от десятичной строки id % 6 — та же формула, что в веб/мобильном клиенте
+    Lolka (client/common/ui/Avatar/utils/color.ts), чтобы дефолтная аватарка совпадала во
+    всех клиентах."""
+    h = 2166136261
+    for ch in str(id):
+        h = ((h ^ ord(ch)) * 16777619) & 0xFFFFFFFF
+    return h % 6
+
+
 class _MissingSentinel:
     __slots__ = ()
 

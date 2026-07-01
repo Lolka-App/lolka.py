@@ -14,7 +14,7 @@ __title__ = 'lolka'
 __author__ = 'lolka'
 __license__ = 'MIT'
 __copyright__ = 'Copyright 2015-present Rapptz; lolka fork'
-__version__ = '0.4.0'
+__version__ = '0.5.0'
 
 __path__ = __import__('pkgutil').extend_path(__path__, __name__)
 

@@ -39,6 +39,10 @@ __all__ = (
 )
 # fmt: on
 
+# Lolka: базовый URL нашего CDN для системных ассетов (дефолтные аватарки).
+# Переопределяется переменной окружения LOLKA_CDN (по аналогии с LOLKA_API_BASE / LOLKA_GATEWAY).
+LOLKA_CDN: str = os.environ.get('LOLKA_CDN', 'https://cdn.lolka.app').rstrip('/')
+
 if TYPE_CHECKING:
     from typing_extensions import Self
 
@@ -229,9 +233,10 @@ class Asset(AssetMixin):
 
     @classmethod
     def _from_default_avatar(cls, state: _State, index: int) -> Self:
+        # Lolka: свои дефолтные аватарки system/avatars/{0..5}.jpg вместо Discord embed/avatars.
         return cls(
             state,
-            url=f'{cls.BASE}/embed/avatars/{index}.png',
+            url=f'{LOLKA_CDN}/system/avatars/{index}.jpg',
             key=str(index),
             animated=False,
         )

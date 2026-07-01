@@ -31,7 +31,7 @@ from .asset import Asset
 from .colour import Colour
 from .enums import DefaultAvatar
 from .flags import PublicUserFlags
-from .utils import snowflake_time, _bytes_to_base64_data, MISSING, _get_as_snowflake
+from .utils import snowflake_time, _bytes_to_base64_data, MISSING, _get_as_snowflake, _lolka_default_avatar_index
 from .primary_guild import PrimaryGuild
 from .collectible import Collectible
 
@@ -187,12 +187,9 @@ class BaseUser(_UserTag):
     @property
     def default_avatar(self) -> Asset:
         """:class:`Asset`: Returns the default avatar for a given user."""
-        if self.discriminator in ('0', '0000'):
-            avatar_id = (self.id >> 22) % len(DefaultAvatar)
-        else:
-            avatar_id = int(self.discriminator) % 5
-
-        return Asset._from_default_avatar(self._state, avatar_id)
+        # Lolka: индекс дефолтной аватарки по FNV-1a от id (как в веб/мобильном клиенте),
+        # чтобы дефолт совпадал во всех клиентах. Дискриминаторов у Lolka нет.
+        return Asset._from_default_avatar(self._state, _lolka_default_avatar_index(self.id))
 
     @property
     def display_avatar(self) -> Asset:
