@@ -26,44 +26,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import struct
-from typing import Any, Callable, List, Optional, TYPE_CHECKING, Tuple, Union
+from typing import Any, Callable, Optional, TYPE_CHECKING, Union
 
-from . import opus
-from .gateway import *
 from .errors import ClientException
-from .player import AudioPlayer, AudioSource
-from .utils import MISSING
-from .voice_state import VoiceConnectionState, has_dave
+from .player import AudioSource
 
 if TYPE_CHECKING:
-    from .gateway import DiscordVoiceWebSocket
     from .client import Client
     from .guild import Guild
     from .state import ConnectionState
     from .user import ClientUser
-    from .opus import Encoder, APPLICATION_CTL, BAND_CTL, SIGNAL_CTL
+    from .opus import APPLICATION_CTL, BAND_CTL, SIGNAL_CTL
     from .channel import StageChannel, VoiceChannel
     from . import abc
 
     from .types.voice import (
         GuildVoiceState as GuildVoiceStatePayload,
         VoiceServerUpdate as VoiceServerUpdatePayload,
-        SupportedModes,
     )
 
     VocalGuildChannel = Union[VoiceChannel, StageChannel]
-
-
-has_nacl: bool
-
-try:
-    import nacl.secret  # type: ignore
-    import nacl.utils  # type: ignore
-
-    has_nacl = True
-except ImportError:
-    has_nacl = False
 
 __all__ = (
     'VoiceProtocol',
@@ -189,17 +171,22 @@ class VoiceProtocol:
 
 
 class VoiceClient(VoiceProtocol):
-    """Represents a Discord voice connection.
+    """Represents a lolka voice connection over WebRTC.
 
     You do not create these, you typically get them from
     e.g. :meth:`VoiceChannel.connect`.
 
+    Voice in lolka works over WebRTC (not Discord UDP/libsodium), so it requires
+    the ``voice`` extra: ``pip install "lolka.py[voice]"`` (which installs the
+    WebRTC voice dependencies). The public interface stays compatible with
+    discord.py's :class:`VoiceClient`, so existing bots keep working after
+    ``import lolka as discord``.
+
     Warning
     --------
-    In order to use PCM based AudioSources, you must have the opus library
-    installed on your system and loaded through :func:`opus.load_opus`.
-    Otherwise, your AudioSources must be opus encoded (e.g. using :class:`FFmpegOpusAudio`)
-    or the library will not be able to transmit audio.
+    In order to use PCM based AudioSources you must have the opus library
+    available (bundled with ``av``/aiortc). Audio is (re)encoded to Opus by
+    aiortc before it is sent.
 
     Attributes
     -----------
@@ -208,42 +195,48 @@ class VoiceClient(VoiceProtocol):
     token: :class:`str`
         The voice connection token.
     endpoint: :class:`str`
-        The endpoint we are connecting to.
+        The voice signaling endpoint we are connecting to.
     channel: Union[:class:`VoiceChannel`, :class:`StageChannel`]
         The voice channel connected to.
+    on_receive_track: Optional[Callable]
+        Optional callback ``(track, user_id, producer_id)`` invoked for every
+        incoming audio track that is consumed from other participants. ``track``
+        is an :class:`aiortc.MediaStreamTrack`. Assign this to receive/record
+        other participants' audio.
     """
 
     channel: VocalGuildChannel
 
+    # WebRTC voice does not use PyNaCl/davey; kept for client.py compatibility.
+    warn_nacl: bool = False
+    warn_dave: bool = False
+
     def __init__(self, client: Client, channel: abc.Connectable) -> None:
-        if not has_nacl:
-            raise RuntimeError('PyNaCl library needed in order to use voice')
-        if not has_dave:
-            raise RuntimeError('davey library needed in order to use voice')
+        try:
+            from . import _voice_impl as _ms
+        except ImportError as exc:
+            raise RuntimeError(
+                'voice requires extra dependencies: install "lolka.py[voice]"'
+            ) from exc
 
         super().__init__(client, channel)
+        self._ms = _ms
         state = client._connection
-        self.server_id: int = MISSING
-        self.socket = MISSING
         self.loop: asyncio.AbstractEventLoop = state.loop
         self._state: ConnectionState = state
 
-        self.sequence: int = 0
-        self.timestamp: int = 0
-        self._player: Optional[AudioPlayer] = None
-        self.encoder: Encoder = MISSING
-        self._incr_nonce: int = 0
+        self._session_id: Optional[str] = None
+        self._token: Optional[str] = None
+        self._endpoint: Optional[str] = None
+        self._state_ready: asyncio.Event = asyncio.Event()
+        self._server_ready: asyncio.Event = asyncio.Event()
 
-        self._connection: VoiceConnectionState = self.create_connection_state()
+        self._conn: Optional[Any] = None  # _voice_impl.VoiceConnection
+        self._connected: bool = False
+        self._timeout: float = 30.0
 
-    warn_nacl: bool = not has_nacl
-    warn_dave: bool = not has_dave
-    supported_modes: Tuple[SupportedModes, ...] = (
-        'aead_xchacha20_poly1305_rtpsize',
-        'xsalsa20_poly1305_lite',
-        'xsalsa20_poly1305_suffix',
-        'xsalsa20_poly1305',
-    )
+        #: пользовательский колбэк приёма входящих треков (track, user_id, producer_id)
+        self.on_receive_track: Optional[Callable[[Any, Any, Any], Any]] = None
 
     @property
     def guild(self) -> Guild:
@@ -257,94 +250,78 @@ class VoiceClient(VoiceProtocol):
 
     @property
     def session_id(self) -> Optional[str]:
-        return self._connection.session_id
+        return self._session_id
 
     @property
     def token(self) -> Optional[str]:
-        return self._connection.token
+        return self._token
 
     @property
     def endpoint(self) -> Optional[str]:
-        return self._connection.endpoint
-
-    @property
-    def ssrc(self) -> int:
-        return self._connection.ssrc
-
-    @property
-    def mode(self) -> SupportedModes:
-        return self._connection.mode
-
-    @property
-    def secret_key(self) -> List[int]:
-        return self._connection.secret_key
-
-    @property
-    def ws(self) -> DiscordVoiceWebSocket:
-        return self._connection.ws
+        return self._endpoint
 
     @property
     def timeout(self) -> float:
-        return self._connection.timeout
-
-    @property
-    def voice_privacy_code(self) -> Optional[str]:
-        """:class:`str`: Get the voice privacy code of this E2EE session's group.
-
-        A new privacy code is created and cached each time a new transition is executed.
-        This can be None if there is no active DAVE session happening.
-
-        .. versionadded:: 2.7
-        """
-        return self._connection.dave_session.voice_privacy_code if self._connection.dave_session else None
-
-    def checked_add(self, attr: str, value: int, limit: int) -> None:
-        val = getattr(self, attr)
-        if val + value > limit:
-            setattr(self, attr, 0)
-        else:
-            setattr(self, attr, val + value)
-
-    # connection related
-
-    def create_connection_state(self) -> VoiceConnectionState:
-        return VoiceConnectionState(self)
-
-    async def on_voice_state_update(self, data: GuildVoiceStatePayload) -> None:
-        await self._connection.voice_state_update(data)
-
-    async def on_voice_server_update(self, data: VoiceServerUpdatePayload) -> None:
-        await self._connection.voice_server_update(data)
-
-    async def connect(self, *, reconnect: bool, timeout: float, self_deaf: bool = False, self_mute: bool = False) -> None:
-        await self._connection.connect(
-            reconnect=reconnect, timeout=timeout, self_deaf=self_deaf, self_mute=self_mute, resume=False
-        )
-
-    def wait_until_connected(self, timeout: Optional[float] = 30.0) -> bool:
-        self._connection.wait(timeout)
-        return self._connection.is_connected()
+        return self._timeout
 
     @property
     def latency(self) -> float:
-        """:class:`float`: Latency between a HEARTBEAT and a HEARTBEAT_ACK in seconds.
+        """:class:`float`: Voice latency in seconds.
 
-        This could be referred to as the Discord Voice WebSocket latency and is
-        an analogue of user's voice latencies as seen in the Discord client.
-
-        .. versionadded:: 1.4
+        Not tracked for the WebRTC transport; returns ``0.0``.
+        Kept for discord.py API compatibility.
         """
-        ws = self._connection.ws
-        return float('inf') if not ws else ws.latency
+        return 0.0
 
     @property
     def average_latency(self) -> float:
-        """:class:`float`: Average of most recent 20 HEARTBEAT latencies in seconds.
+        """:class:`float`: Average voice latency in seconds (see :attr:`latency`)."""
+        return 0.0
 
-        .. versionadded:: 1.4
-        """
-        ws = self._connection.ws
-        return float('inf') if not ws else ws.average_latency
+    # connection related
+
+    async def on_voice_state_update(self, data: GuildVoiceStatePayload) -> None:
+        self._session_id = data.get('session_id')
+        if data.get('channel_id') is None:
+            # нас отключили извне (kick/move/delete)
+            self.loop.create_task(self._teardown())
+            return
+        self._state_ready.set()
+
+    async def on_voice_server_update(self, data: VoiceServerUpdatePayload) -> None:
+        self._token = data.get('token')
+        self._endpoint = data.get('endpoint')
+        self._server_ready.set()
+
+    async def connect(self, *, reconnect: bool, timeout: float, self_deaf: bool = False, self_mute: bool = False) -> None:
+        self._timeout = timeout
+        guild = self.channel.guild
+        await guild.change_voice_state(channel=self.channel, self_mute=self_mute, self_deaf=self_deaf)
+        await asyncio.wait_for(
+            asyncio.gather(self._state_ready.wait(), self._server_ready.wait()),
+            timeout=timeout,
+        )
+        if not self._endpoint or not self._token:
+            raise ClientException('voice server did not provide an endpoint/token')
+
+        _log.info('voice: connecting to voice endpoint=%s', self._endpoint)
+        self._conn = self._ms.VoiceConnection(
+            self._endpoint, self._token, on_receive_track=self._handle_track
+        )
+        await self._conn.start()
+        self._connected = True
+
+    def _handle_track(self, track: Any, user_id: Any, producer_id: Any) -> None:
+        cb = self.on_receive_track
+        if cb is not None:
+            cb(track, user_id, producer_id)
+
+    def wait_until_connected(self, timeout: Optional[float] = 30.0) -> bool:
+        return self._connected
+
+    def is_connected(self) -> bool:
+        """Indicates if the voice client is connected to voice."""
+        return self._connected
 
     async def disconnect(self, *, force: bool = False) -> None:
         """|coro|
@@ -352,13 +329,28 @@ class VoiceClient(VoiceProtocol):
         Disconnects this voice client from voice.
         """
         self.stop()
-        await self._connection.disconnect(force=force, wait=True)
-        self.cleanup()
+        try:
+            if self._conn is not None:
+                await self._conn.close()
+        finally:
+            self._conn = None
+            self._connected = False
+            try:
+                await self.channel.guild.change_voice_state(channel=None)
+            except Exception:
+                pass
+            self.cleanup()
 
     async def move_to(self, channel: Optional[abc.Snowflake], *, timeout: Optional[float] = 30.0) -> None:
         """|coro|
 
         Moves you to a different voice channel.
+
+        .. note::
+
+            For the WebRTC transport this changes the gateway voice state to the
+            target channel. Re-establishing the media session on a new room
+            happens through the resulting ``VOICE_SERVER_UPDATE``.
 
         Parameters
         -----------
@@ -366,79 +358,23 @@ class VoiceClient(VoiceProtocol):
             The channel to move to. Must be a voice channel.
         timeout: Optional[:class:`float`]
             How long to wait for the move to complete.
-
-            .. versionadded:: 2.4
-
-        Raises
-        -------
-        asyncio.TimeoutError
-            The move did not complete in time, but may still be ongoing.
         """
-        await self._connection.move_to(channel, timeout)
+        await self.channel.guild.change_voice_state(channel=channel)
 
-    def is_connected(self) -> bool:
-        """Indicates if the voice client is connected to voice."""
-        return self._connection.is_connected()
+    async def _teardown(self) -> None:
+        if self._conn is not None:
+            try:
+                await self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+        self._connected = False
+        try:
+            self.cleanup()
+        except Exception:
+            pass
 
     # audio related
-
-    def _get_voice_packet(self, data: bytes):
-        packet = (
-            self._connection.dave_session.encrypt_opus(data)
-            if self._connection.dave_session and self._connection.can_encrypt
-            else data
-        )
-        header = bytearray(12)
-
-        # Formulate rtp header
-        header[0] = 0x80
-        header[1] = 0x78
-        struct.pack_into('>H', header, 2, self.sequence)
-        struct.pack_into('>I', header, 4, self.timestamp)
-        struct.pack_into('>I', header, 8, self.ssrc)
-
-        encrypt_packet = getattr(self, '_encrypt_' + self.mode)
-        return encrypt_packet(header, packet)
-
-    def _encrypt_aead_xchacha20_poly1305_rtpsize(self, header: bytes, data) -> bytes:
-        # Esentially the same as _lite
-        # Uses an incrementing 32-bit integer which is appended to the payload
-        # The only other difference is we require AEAD with Additional Authenticated Data (the header)
-        box = nacl.secret.Aead(bytes(self.secret_key))
-        nonce = bytearray(24)
-
-        nonce[:4] = struct.pack('>I', self._incr_nonce)
-        self.checked_add('_incr_nonce', 1, 4294967295)
-
-        return header + box.encrypt(bytes(data), bytes(header), bytes(nonce)).ciphertext + nonce[:4]
-
-    def _encrypt_xsalsa20_poly1305(self, header: bytes, data) -> bytes:
-        # Deprecated. Removal: 18th Nov 2024. See:
-        # https://discord.com/developers/docs/topics/voice-connections#transport-encryption-modes
-        box = nacl.secret.SecretBox(bytes(self.secret_key))
-        nonce = bytearray(24)
-        nonce[:12] = header
-
-        return header + box.encrypt(bytes(data), bytes(nonce)).ciphertext
-
-    def _encrypt_xsalsa20_poly1305_suffix(self, header: bytes, data) -> bytes:
-        # Deprecated. Removal: 18th Nov 2024. See:
-        # https://discord.com/developers/docs/topics/voice-connections#transport-encryption-modes
-        box = nacl.secret.SecretBox(bytes(self.secret_key))
-        nonce = nacl.utils.random(nacl.secret.SecretBox.NONCE_SIZE)
-
-        return header + box.encrypt(bytes(data), nonce).ciphertext + nonce
-
-    def _encrypt_xsalsa20_poly1305_lite(self, header: bytes, data) -> bytes:
-        # Deprecated. Removal: 18th Nov 2024. See:
-        # https://discord.com/developers/docs/topics/voice-connections#transport-encryption-modes
-        box = nacl.secret.SecretBox(bytes(self.secret_key))
-        nonce = bytearray(24)
-
-        nonce[:4] = struct.pack('>I', self._incr_nonce)
-        self.checked_add('_incr_nonce', 1, 4294967295)
-
-        return header + box.encrypt(bytes(data), bytes(nonce)).ciphertext + nonce[:4]
 
     def play(
         self,
@@ -457,18 +393,11 @@ class VoiceClient(VoiceProtocol):
         The finalizer, ``after`` is called after the source has been exhausted
         or an error occurred.
 
-        If an error happens while the audio player is running, the exception is
-        caught and the audio player is then stopped.  If no after callback is
-        passed, any caught exception will be logged using the library logger.
-
-        Extra parameters may be passed to the internal opus encoder if a PCM based
-        source is used.  Otherwise, they are ignored.
-
-        .. versionchanged:: 2.0
-            Instead of writing to ``sys.stderr``, the library's logger is used.
-
-        .. versionchanged:: 2.4
-            Added encoder parameters as keyword arguments.
+        The audio is fed into the WebRTC send track and (re)encoded to Opus by
+        aiortc, then streamed. The Opus encoder parameters
+        (``application``, ``bitrate``, ``fec``, ``expected_packet_loss``,
+        ``bandwidth``, ``signal_type``) are accepted for discord.py API
+        compatibility but are managed by aiortc for this transport.
 
         Parameters
         -----------
@@ -476,87 +405,47 @@ class VoiceClient(VoiceProtocol):
             The audio source we're reading from.
         after: Callable[[Optional[:class:`Exception`]], Any]
             The finalizer that is called after the stream is exhausted.
-            This function must have a single parameter, ``error``, that
-            denotes an optional exception that was raised during playing.
-        application: :class:`str`
-            Configures the encoder's intended application.  Can be one of:
-            ``'audio'``, ``'voip'``, ``'lowdelay'``.
-            Defaults to ``'audio'``.
-        bitrate: :class:`int`
-            Configures the bitrate in the encoder.  Can be between ``16`` and ``512``.
-            Defaults to ``128``.
-        fec: :class:`bool`
-            Configures the encoder's use of inband forward error correction.
-            Defaults to ``True``.
-        expected_packet_loss: :class:`float`
-            Configures the encoder's expected packet loss percentage.  Requires FEC.
-            Defaults to ``0.15``.
-        bandwidth: :class:`str`
-            Configures the encoder's bandpass.  Can be one of:
-            ``'narrow'``, ``'medium'``, ``'wide'``, ``'superwide'``, ``'full'``.
-            Defaults to ``'full'``.
-        signal_type: :class:`str`
-            Configures the type of signal being encoded.  Can be one of:
-            ``'auto'``, ``'voice'``, ``'music'``.
-            Defaults to ``'auto'``.
 
         Raises
         -------
         ClientException
             Already playing audio or not connected.
         TypeError
-            Source is not a :class:`AudioSource` or after is not a callable.
-        OpusNotLoaded
-            Source is not opus encoded and opus is not loaded.
-        ValueError
-            An improper value was passed as an encoder parameter.
+            Source is not a :class:`AudioSource`.
         """
-
         if not self.is_connected():
             raise ClientException('Not connected to voice.')
-
         if self.is_playing():
             raise ClientException('Already playing audio.')
-
         if not isinstance(source, AudioSource):
             raise TypeError(f'source must be an AudioSource not {source.__class__.__name__}')
 
-        if not source.is_opus():
-            self.encoder = opus.Encoder(
-                application=application,
-                bitrate=bitrate,
-                fec=fec,
-                expected_packet_loss=expected_packet_loss,
-                bandwidth=bandwidth,
-                signal_type=signal_type,
-            )
-
-        self._player = AudioPlayer(source, self, after=after)
-        self._player.start()
+        self._conn.out_track.set_source(source, after)
 
     def is_playing(self) -> bool:
         """Indicates if we're currently playing audio."""
-        return self._player is not None and self._player.is_playing()
+        track = self._conn.out_track if self._conn else None
+        return track is not None and track.is_playing
 
     def is_paused(self) -> bool:
         """Indicates if we're playing audio, but if we're paused."""
-        return self._player is not None and self._player.is_paused()
+        track = self._conn.out_track if self._conn else None
+        return track is not None and track.is_paused
 
     def stop(self) -> None:
         """Stops playing audio."""
-        if self._player:
-            self._player.stop()
-            self._player = None
+        if self._conn is not None and self._conn.out_track is not None:
+            self._conn.out_track.set_source(None)
 
     def pause(self) -> None:
         """Pauses the audio playing."""
-        if self._player:
-            self._player.pause()
+        if self._conn is not None and self._conn.out_track is not None:
+            self._conn.out_track.pause()
 
     def resume(self) -> None:
         """Resumes the audio playing."""
-        if self._player:
-            self._player.resume()
+        if self._conn is not None and self._conn.out_track is not None:
+            self._conn.out_track.resume()
 
     @property
     def source(self) -> Optional[AudioSource]:
@@ -564,47 +453,14 @@ class VoiceClient(VoiceProtocol):
 
         This property can also be used to change the audio source currently being played.
         """
-        return self._player.source if self._player else None
+        track = self._conn.out_track if self._conn else None
+        return track.source if track is not None else None
 
     @source.setter
     def source(self, value: AudioSource) -> None:
         if not isinstance(value, AudioSource):
             raise TypeError(f'expected AudioSource not {value.__class__.__name__}.')
-
-        if self._player is None:
+        track = self._conn.out_track if self._conn else None
+        if track is None or track.source is None:
             raise ValueError('Not playing anything.')
-
-        self._player.set_source(value)
-
-    def send_audio_packet(self, data: bytes, *, encode: bool = True) -> None:
-        """Sends an audio packet composed of the data.
-
-        You must be connected to play audio.
-
-        Parameters
-        ----------
-        data: :class:`bytes`
-            The :term:`py:bytes-like object` denoting PCM or Opus voice data.
-        encode: :class:`bool`
-            Indicates if ``data`` should be encoded into Opus.
-
-        Raises
-        -------
-        ClientException
-            You are not connected.
-        opus.OpusError
-            Encoding the data failed.
-        """
-
-        self.checked_add('sequence', 1, 65535)
-        if encode:
-            encoded_data = self.encoder.encode(data, self.encoder.SAMPLES_PER_FRAME)
-        else:
-            encoded_data = data
-        packet = self._get_voice_packet(encoded_data)
-        try:
-            self._connection.send_packet(packet)
-        except OSError:
-            _log.debug('A packet has been dropped (seq: %s, timestamp: %s)', self.sequence, self.timestamp)
-
-        self.checked_add('timestamp', opus.Encoder.SAMPLES_PER_FRAME, 4294967295)
+        track.set_source(value, track._after)

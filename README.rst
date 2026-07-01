@@ -61,6 +61,32 @@ Bot Example
 
     bot.run('token')
 
+Voice
+-----
+
+Voice works over WebRTC (lolka's voice stack), not Discord's UDP transport,
+so it needs the ``voice`` extra:
+
+.. code:: sh
+
+    python3 -m pip install -U "lolka.py[voice]"
+
+The API stays discord.py-compatible — ``await channel.connect()`` returns a
+``VoiceClient`` that speaks lolka's WebRTC voice under the hood:
+
+.. code:: py
+
+    vc = await channel.connect()
+    vc.play(lolka.FFmpegPCMAudio('song.mp3'))
+
+    # receive/record other participants' audio (optional):
+    def on_track(track, user_id, producer_id):
+        ...  # track is an aiortc MediaStreamTrack
+    vc.on_receive_track = on_track
+
+    ...
+    await vc.disconnect()
+
 Migrating from discord.py
 --------------------------
 
