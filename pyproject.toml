@@ -31,7 +31,6 @@ dynamic = ["version", "dependencies"]
 [project.urls]
 Homepage = "https://github.com/Lolka-App/lolka.py"
 "Issue tracker" = "https://github.com/Lolka-App/lolka.py/issues"
-"Upstream (discord.py)" = "https://github.com/Rapptz/discord.py"
 
 [tool.setuptools.dynamic]
 dependencies = { file = "requirements.txt" }
