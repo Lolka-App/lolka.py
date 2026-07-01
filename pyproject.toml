@@ -36,12 +36,9 @@ Homepage = "https://github.com/Lolka-App/lolka.py"
 dependencies = { file = "requirements.txt" }
 
 [project.optional-dependencies]
-# lolka voice использует WebRTC (как клиенты lolka), а не Discord-voice/libsodium:
-# aiortc даёт ICE/DTLS-SRTP и Opus, плюс клиентская сторона сигналинга.
-voice = [
-    "aiortc>=1.9.0",
-    "pymediasoup>=1.5.0",
-]
+# lolka voice работает из коробки (WebRTC-зависимости в основном requirements.txt).
+# Пустой extra оставлен для обратной совместимости с `lolka.py[voice]`.
+voice = []
 docs = [
     "sphinx==4.4.0",
     "sphinxcontrib_trio==1.1.2",

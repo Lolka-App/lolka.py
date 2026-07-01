@@ -64,12 +64,8 @@ Bot Example
 Voice
 -----
 
-Voice works over WebRTC (lolka's voice stack), not Discord's UDP transport,
-so it needs the ``voice`` extra:
-
-.. code:: sh
-
-    python3 -m pip install -U "lolka.py[voice]"
+Voice works over WebRTC (lolka's voice stack), not Discord's UDP transport.
+The required dependencies ship with the base install — nothing extra to add.
 
 The API stays discord.py-compatible — ``await channel.connect()`` returns a
 ``VoiceClient`` that speaks lolka's WebRTC voice under the hood:
