@@ -135,6 +135,15 @@ def _lolka_default_avatar_index(id: int, /) -> int:
     return h % 6
 
 
+def _discord_snowflake_time(id: int, /) -> datetime.datetime:
+    """Декод РЕАЛЬНОЙ Discord-раскладки (сдвиг 22, эпоха 2015-01-01). Используется ТОЛЬКО для
+    interaction ID: сервер генерит его в Discord-формате ради совместимости с ванильным
+    discord.py, поэтому декодировать created_at/expiry надо тоже по-дискордовски, а не по
+    lolka-раскладке (у которой в этом форке эпоха 2025 и сдвиг 14)."""
+    timestamp = ((id >> 22) + 1420070400000) / 1000
+    return datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
+
+
 class _MissingSentinel:
     __slots__ = ()
 

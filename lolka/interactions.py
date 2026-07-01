@@ -417,7 +417,9 @@ class Interaction(Generic[ClientT]):
     @property
     def created_at(self) -> datetime.datetime:
         """:class:`datetime.datetime`: When the interaction was created."""
-        return utils.snowflake_time(self.id)
+        # interaction ID сервер генерит в Discord-раскладке (ради ванильного discord.py),
+        # поэтому декодируем его по Discord-раскладке, а не по lolka-раскладке.
+        return utils._discord_snowflake_time(self.id)
 
     @property
     def expires_at(self) -> datetime.datetime:
