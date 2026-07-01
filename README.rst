@@ -60,3 +60,36 @@ Bot Example
         await ctx.send('pong')
 
     bot.run('token')
+
+Migrating from discord.py
+--------------------------
+
+Already have a discord.py bot? You don't have to rewrite it — just alias the import:
+
+.. code:: py
+
+    import lolka as discord
+    from lolka.ext import commands
+
+    # everything below is unmodified discord.py bot code
+    intents = discord.Intents.default()
+    intents.message_content = True
+    bot = commands.Bot(command_prefix='>', intents=intents)
+
+    @bot.command()
+    async def ping(ctx):
+        await ctx.send('pong')
+
+    bot.run('token')
+
+``import lolka as discord`` covers every ``discord.Whatever`` attribute access in your existing code
+(``discord.Client``, ``discord.Intents``, ``discord.Embed``, checks, errors, and so on). The only
+lines that actually need editing are explicit submodule imports, since Python resolves those by
+real module path rather than by the alias:
+
+- ``import discord`` → ``import lolka as discord``
+- ``from discord import X`` → ``from lolka import X``
+- ``from discord.ext import commands`` → ``from lolka.ext import commands``
+- ``from discord import app_commands`` → ``from lolka import app_commands``
+
+That's it — the rest of your bot's code stays exactly as it is.
