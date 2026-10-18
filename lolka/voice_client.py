@@ -234,6 +234,7 @@ class VoiceClient(VoiceProtocol):
         self._conn: Optional[Any] = None  # _voice_impl.VoiceConnection
         self._connected: bool = False
         self._timeout: float = 30.0
+        self._migrate_lock: asyncio.Lock = asyncio.Lock()  # переезды на новый voice-сервер — по одному
 
         #: пользовательский колбэк приёма входящих треков (track, user_id, producer_id)
         self.on_receive_track: Optional[Callable[[Any, Any, Any], Any]] = None
@@ -289,9 +290,55 @@ class VoiceClient(VoiceProtocol):
         self._state_ready.set()
 
     async def on_voice_server_update(self, data: VoiceServerUpdatePayload) -> None:
-        self._token = data.get('token')
-        self._endpoint = data.get('endpoint')
+        token = data.get('token')
+        endpoint = data.get('endpoint')
+        # Повторный VOICE_SERVER_UPDATE с другим endpoint у уже подключённого клиента — голосовой
+        # сервер сменился (failover или перенос канала на другой инстанс): переезжаем на него.
+        # Смена одного лишь токена сессию не трогает: бэкенд перевыпускает его на каждый
+        # VOICE_STATE_UPDATE (например, при self_mute).
+        server_changed = self._connected and bool(token) and bool(endpoint) and endpoint != self._endpoint
+        self._token = token
+        self._endpoint = endpoint
         self._server_ready.set()
+        if server_changed:
+            self.loop.create_task(self._migrate())
+
+    async def _migrate(self) -> None:
+        """Пересобирает WebRTC-сессию на новом голосовом сервере.
+
+        Исходящий трек переносится в новую сессию, поэтому текущее воспроизведение
+        (источник, ``after``-колбэк, пауза) не прерывается.
+        """
+        async with self._migrate_lock:
+            old = self._conn
+            endpoint, token = self._endpoint, self._token
+            if old is None or not self._connected or not endpoint or not token:
+                return
+            if old._endpoint == endpoint:
+                return  # уже переехали (события пришли пачкой)
+
+            _log.info('voice: voice server changed, migrating to endpoint=%s', endpoint)
+            # Трек отвязываем от старой сессии, иначе её close() сбросил бы источник.
+            out_track = old.out_track
+            old.out_track = None
+            conn = self._ms.VoiceConnection(
+                endpoint, token, on_receive_track=self._handle_track, out_track=out_track
+            )
+            # Новую сессию выставляем сразу: play()/stop()/is_playing() продолжают работать
+            # с тем же треком, пока она поднимается.
+            self._conn = conn
+            try:
+                await old.close()
+            except Exception:
+                pass
+
+            try:
+                await conn.start()
+            except Exception:
+                if self._conn is not conn:
+                    return  # нас отключили, пока переезжали
+                _log.exception('voice: failed to migrate to the new voice server')
+                await self.disconnect(force=True)
 
     async def connect(self, *, reconnect: bool, timeout: float, self_deaf: bool = False, self_mute: bool = False) -> None:
         self._timeout = timeout

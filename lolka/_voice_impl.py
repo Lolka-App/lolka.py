@@ -115,6 +115,29 @@ class SourceAudioTrack(MediaStreamTrack):
     def resume(self) -> None:
         self._paused = False
 
+    def stop(self) -> None:
+        """Ничего не делает: трек живёт дольше одной WebRTC-сессии.
+
+        aiortc при закрытии транспорта сам вызывает ``track.stop()`` у sender'а, а на
+        завершённом треке новая сессия уже не сможет сделать ``produce`` ("track ended").
+        Трек переносится в новую сессию при смене голосового сервера, поэтому завершает
+        его только владелец — через :meth:`end`.
+        """
+
+    def end(self) -> None:
+        """Окончательно завершить трек (сессия закрывается без переноса трека)."""
+        super().stop()
+
+    def reset_clock(self) -> None:
+        """Сбросить отсчёт темпа кадров.
+
+        Нужен при переносе трека в новую сессию (смена голосового сервера): пока
+        трек никто не читал, расписание ушло в прошлое, и без сброса recv() выдал
+        бы накопившиеся кадры пачкой без пауз.
+        """
+        self._samples = 0
+        self._start = None
+
     def _finish(self, error: Optional[Exception]) -> None:
         after = self._after
         self._source = None
@@ -241,7 +264,13 @@ class VoiceConnection:
     тонкий фасад поверх этого класса.
     """
 
-    def __init__(self, endpoint: str, token: str, on_receive_track: Optional[Callable] = None) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        token: str,
+        on_receive_track: Optional[Callable] = None,
+        out_track: Optional[SourceAudioTrack] = None,
+    ) -> None:
         self._endpoint = endpoint
         self._token = token
         self._on_receive_track = on_receive_track
@@ -251,7 +280,9 @@ class VoiceConnection:
         self.send_transport = None
         self.recv_transport = None
         self.producer = None
-        self.out_track: Optional[SourceAudioTrack] = None
+        # out_track можно передать из прежней сессии (смена голосового сервера) —
+        # тогда текущее воспроизведение продолжится в новой.
+        self.out_track: Optional[SourceAudioTrack] = out_track
         self._send_connected = asyncio.Event()
         self._recv_connected = asyncio.Event()
         self.consumers: Dict[str, Any] = {}
@@ -275,7 +306,10 @@ class VoiceConnection:
         await self._create_send_transport()
         await self._create_recv_transport()
 
-        self.out_track = SourceAudioTrack()
+        if self.out_track is None:
+            self.out_track = SourceAudioTrack()
+        else:
+            self.out_track.reset_clock()
         self.producer = await self.send_transport.produce(
             track=self.out_track,
             stopTracks=False,
@@ -286,6 +320,13 @@ class VoiceConnection:
         res = await self.signaling.request('getProducers', {})
         for p in res.get('producers', []):
             await self._consume(p['producerId'], p.get('userId'), p.get('kind'))
+
+        if self._closed:
+            # Нас закрыли, пока сессия поднималась (kick/disconnect во время переезда):
+            # close() отработал по ещё пустым полям — добиваем то, что успело подняться.
+            self._closed = False
+            await self.close()
+            raise RuntimeError('voice connection was closed while starting')
 
     async def _create_send_transport(self) -> None:
         params = await self.signaling.request('createWebRtcTransport', {'direction': 'send'})
@@ -393,6 +434,9 @@ class VoiceConnection:
                     pass
         self.send_transport = None
         self.recv_transport = None
+        # Трек всё ещё наш (его не забрали в новую сессию) — завершаем окончательно.
+        if self.out_track is not None:
+            self.out_track.end()
         if self.signaling is not None:
             try:
                 await self.signaling.close()
