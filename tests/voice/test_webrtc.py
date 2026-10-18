@@ -478,3 +478,36 @@ async def test_stop_while_waiting_for_the_previous_reader_cleans_up_after_it_exi
     release.set()
     await asyncio.sleep(0.5)
     assert events[:1] == ["cleanup"]  # (AudioSource.__del__ may add another)
+
+@pytest.mark.asyncio
+async def test_replaced_reader_chain_never_reads_in_parallel_with_a_hung_read(monkeypatch):
+    monkeypatch.setattr(_voice_impl, "AFTER_JOIN_TIMEOUT", 0.2)
+    release = threading.Event()
+    log = []
+
+    class Hung(AudioSource):
+        def read(self):
+            log.append("hung-in")
+            release.wait(5)
+            log.append("hung-out")
+            return b""
+
+    class Wrapper(AudioSource):
+        def __init__(self, inner):
+            self.inner = inner
+
+        def read(self):
+            log.append("wrapper-read")
+            return b""
+
+    track = _voice_impl.SourceAudioTrack()
+    track.set_source(Hung())
+    await asyncio.sleep(0.1)
+    track.replace_source(Wrapper(track.source))
+    track.replace_source(Wrapper(track.source))
+    await asyncio.sleep(0.6)  # longer than AFTER_JOIN_TIMEOUT
+    assert log == ["hung-in"]
+    release.set()
+    await asyncio.sleep(0.3)
+    assert log[:2] == ["hung-in", "hung-out"]
+    track.stop_source()

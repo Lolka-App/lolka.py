@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from typing import Any, Callable, Optional, TYPE_CHECKING, Union
+from typing import Any, Callable, List, Optional, Tuple, TYPE_CHECKING, Union
 
 from .errors import ClientException
 from .player import AudioSource
@@ -185,16 +185,19 @@ class VoiceClient(VoiceProtocol):
     e.g. :meth:`VoiceChannel.connect`.
 
     Voice in lolka works over WebRTC (not Discord UDP/libsodium), so it requires
-    the ``voice`` extra: ``pip install "lolka.py[voice]"`` (which installs the
-    WebRTC voice dependencies). The public interface stays compatible with
+    the WebRTC voice dependencies (aiortc, pymediasoup), which ship with the base
+    install of ``lolka.py``. The public interface stays compatible with
     discord.py's :class:`VoiceClient`, so existing bots keep working after
     ``import lolka as discord``.
 
     Warning
     --------
-    In order to use PCM based AudioSources you must have the opus library
-    available (bundled with ``av``/aiortc). Audio is (re)encoded to Opus by
-    aiortc before it is sent.
+    In order to play Opus based AudioSources (``is_opus()`` returns ``True``, e.g.
+    :class:`FFmpegOpusAudio`) you must have the libopus library available (it is
+    loaded automatically when it can be found; bundled on Windows, on Linux install
+    e.g. ``apt install libopus0``): they are decoded to PCM first. PCM based
+    AudioSources (:class:`FFmpegPCMAudio`) do not need libopus, audio is encoded to
+    Opus by aiortc before it is sent.
 
     Attributes
     -----------
@@ -222,12 +225,15 @@ class VoiceClient(VoiceProtocol):
     warn_nacl: bool = False
     warn_dave: bool = False
 
+    #: Discord UDP encryption modes; there are none for the WebRTC transport.
+    supported_modes: Tuple[str, ...] = ()
+
     def __init__(self, client: Client, channel: abc.Connectable) -> None:
         try:
             from . import _voice_impl as _ms
         except ImportError as exc:
             raise RuntimeError(
-                'voice requires extra dependencies: install "lolka.py[voice]"'
+                'voice requires aiortc and pymediasoup: reinstall "lolka.py"'
             ) from exc
 
         super().__init__(client, channel)
@@ -268,19 +274,21 @@ class VoiceClient(VoiceProtocol):
 
     # tasks
 
-    def _spawn(self, coro: Any, name: Optional[str] = None) -> asyncio.Task:
-        task = self.loop.create_task(coro, name=name)
+    def _spawn(self, coro: Any, name: Optional[str] = None) -> asyncio.Future:
+        task = asyncio.ensure_future(coro, loop=self.loop)
+        if name is not None and isinstance(task, asyncio.Task):
+            task.set_name(name)
         self._tasks.add(task)
         task.add_done_callback(self._task_done)
         return task
 
-    def _task_done(self, task: asyncio.Task) -> None:
+    def _task_done(self, task: asyncio.Future) -> None:
         self._tasks.discard(task)
         if task.cancelled():
             return
         exc = task.exception()
         if exc is not None:
-            _log.error('unhandled error in voice task %s', task.get_name(), exc_info=exc)
+            _log.error('unhandled error in voice task %s', task.get_name() if isinstance(task, asyncio.Task) else task, exc_info=exc)
 
     @property
     def guild(self) -> Guild:
@@ -305,8 +313,41 @@ class VoiceClient(VoiceProtocol):
         return self._endpoint
 
     @property
+    def ssrc(self) -> int:
+        """:class:`int`: Always ``0``, there is no RTP SSRC handshake on the WebRTC transport."""
+        return 0
+
+    @property
+    def mode(self) -> str:
+        """:class:`str`: The transport mode, always ``'webrtc'``."""
+        return 'webrtc'
+
+    @property
+    def secret_key(self) -> List[int]:
+        """List[:class:`int`]: Always empty, encryption is handled by WebRTC (DTLS-SRTP)."""
+        return []
+
+    @property
+    def ws(self) -> None:
+        """Always ``None``, there is no Discord voice websocket on the WebRTC transport."""
+        return None
+
+    @property
+    def voice_privacy_code(self) -> Optional[str]:
+        """Always ``None``, there is no DAVE session on the WebRTC transport."""
+        return None
+
+    @property
     def timeout(self) -> float:
         return self._timeout
+
+    def checked_add(self, attr: str, value: int, limit: int) -> None:
+        """Adds ``value`` to ``attr``, wrapping it to ``0`` once it passes ``limit``."""
+        val = getattr(self, attr)
+        if val + value > limit:
+            setattr(self, attr, 0)
+        else:
+            setattr(self, attr, val + value)
 
     @property
     def latency(self) -> float:
@@ -422,12 +463,13 @@ class VoiceClient(VoiceProtocol):
 
                 _log.info('voice server changed, migrating to endpoint=%s', endpoint)
                 # detach the track from the old session, or its close() would reset the source
-                out_track = old.out_track
-                old.out_track = None
-                conn = self._make_conn(endpoint, token, out_track)
+                conn = self._make_conn(endpoint, token, old.out_track)
                 # Set the new session right away: play()/stop()/is_playing() keep
-                # working with the same track while it comes up.
+                # working with the same track while it comes up. The track is
+                # detached from the old session only after that, so there is no
+                # window in which self._conn has no track.
                 self._conn = conn
+                old.out_track = None
                 self._drop_remote_tracks()
                 try:
                     await old.close()
@@ -663,16 +705,22 @@ class VoiceClient(VoiceProtocol):
             elif exc is not None:
                 _log.error('Error while playing audio', exc_info=exc)
 
-        self._conn.out_track.set_source(source, _after)
+        conn = self._conn
+        track = conn.out_track if conn else None
+        if track is None:
+            raise ClientException('Not connected to voice.')
+        track.set_source(source, _after)
 
     def is_playing(self) -> bool:
         """Indicates if we're currently playing audio."""
-        track = self._conn.out_track if self._conn else None
+        conn = self._conn
+        track = conn.out_track if conn else None
         return track is not None and track.is_playing
 
     def is_paused(self) -> bool:
         """Indicates if we're playing audio, but if we're paused."""
-        track = self._conn.out_track if self._conn else None
+        conn = self._conn
+        track = conn.out_track if conn else None
         return track is not None and track.is_paused
 
     def stop(self) -> None:
@@ -680,19 +728,22 @@ class VoiceClient(VoiceProtocol):
 
         The ``after`` callback of the stopped source is called.
         """
-        track = self._conn.out_track if self._conn else None
+        conn = self._conn
+        track = conn.out_track if conn else None
         if track is not None:
             track.stop_source()
 
     def pause(self) -> None:
         """Pauses the audio playing."""
-        track = self._conn.out_track if self._conn else None
+        conn = self._conn
+        track = conn.out_track if conn else None
         if track is not None:
             track.pause()
 
     def resume(self) -> None:
         """Resumes the audio playing."""
-        track = self._conn.out_track if self._conn else None
+        conn = self._conn
+        track = conn.out_track if conn else None
         if track is not None:
             track.resume()
 
@@ -705,7 +756,8 @@ class VoiceClient(VoiceProtocol):
         ``vc.source = PCMVolumeTransformer(vc.source)``); the ``after`` callback and
         the paused state are kept.
         """
-        track = self._conn.out_track if self._conn else None
+        conn = self._conn
+        track = conn.out_track if conn else None
         return track.source if track is not None else None
 
     @source.setter
@@ -713,7 +765,18 @@ class VoiceClient(VoiceProtocol):
         if not isinstance(value, AudioSource):
             raise TypeError(f'expected AudioSource not {value.__class__.__name__}.')
 
-        track = self._conn.out_track if self._conn else None
+        conn = self._conn
+        track = conn.out_track if conn else None
         if track is None or track.source is None:
             raise ValueError('Not playing anything.')
         track.replace_source(value)
+
+    def send_audio_packet(self, data: bytes, *, encode: bool = True) -> None:
+        """Not supported: raw packets cannot be sent over the WebRTC transport.
+
+        Raises
+        -------
+        ClientException
+            Always, use :meth:`play` instead.
+        """
+        raise ClientException('send_audio_packet is not supported by the WebRTC transport, use play()')

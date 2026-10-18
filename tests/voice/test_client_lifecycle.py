@@ -287,6 +287,30 @@ async def test_voice_client_keeps_the_discord_py_public_api():
         "connect", "disconnect", "move_to", "play", "stop", "pause", "resume",
         "is_playing", "is_paused", "is_connected", "wait_until_connected",
         "latency", "average_latency", "guild", "user", "source",
+        "session_id", "token", "endpoint", "ssrc", "mode", "secret_key", "ws",
+        "timeout", "voice_privacy_code", "supported_modes", "warn_nacl", "warn_dave",
+        "checked_add", "send_audio_packet", "on_voice_state_update",
+        "on_voice_server_update", "cleanup",
     ):
         assert hasattr(voice_client_module.VoiceClient, name), name
     assert lolka.VoiceClient is voice_client_module.VoiceClient
+
+
+async def test_voice_client_webrtc_stubs():
+    vc, _ = make_vc()
+    assert vc.ssrc == 0
+    assert vc.mode == "webrtc"
+    assert vc.secret_key == []
+    assert vc.ws is None
+    assert vc.voice_privacy_code is None
+    assert vc.supported_modes == ()
+    with pytest.raises(lolka.ClientException, match="use play"):
+        vc.send_audio_packet(b"data")
+
+
+async def test_play_without_a_connection_raises_client_exception():
+    vc, _ = make_vc()
+    vc._connected = True
+    vc._conn = None
+    with pytest.raises(lolka.ClientException, match="Not connected"):
+        vc.play(PCMAudio(io.BytesIO(b"\x00" * FRAME_BYTES)))

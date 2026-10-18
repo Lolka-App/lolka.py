@@ -66,6 +66,8 @@ Voice
 
 Voice works over WebRTC (lolka's voice stack), not Discord's UDP transport.
 The required dependencies ship with the base install — nothing extra to add.
+Opus sources (``FFmpegOpusAudio``) need the system libopus (``apt install libopus0``; bundled on Windows);
+PCM sources (``FFmpegPCMAudio``) don't.
 
 The API stays discord.py-compatible — ``await channel.connect()`` returns a
 ``VoiceClient`` that speaks lolka's WebRTC voice under the hood:

@@ -64,3 +64,49 @@ def test_snowflake_roundtrip():
 )
 def test_default_avatar_index(id, expected):
     assert utils._lolka_default_avatar_index(id) == expected
+
+
+WEBHOOK_TOKEN = 'a' * 64
+
+
+def _webhook_classes_with_sessions():
+    requests = pytest.importorskip('requests')
+    return ((lolka.Webhook, mock.MagicMock()), (lolka.SyncWebhook, requests.Session()))
+
+
+@pytest.mark.parametrize(
+    'url, webhook_id',
+    [
+        (f'https://lolka.app/api/webhooks/123456789012345/{WEBHOOK_TOKEN}', 123456789012345),
+        (f'http://localhost/api/webhooks/123456789012345/{WEBHOOK_TOKEN}', 123456789012345),
+        (f'https://discord.com/api/webhooks/175928847299117063/{WEBHOOK_TOKEN}', 175928847299117063),
+        (f'https://discordapp.com/api/webhooks/175928847299117063/{WEBHOOK_TOKEN}', 175928847299117063),
+    ],
+)
+def test_webhook_from_url_accepts_any_host(url, webhook_id):
+    for cls, session in _webhook_classes_with_sessions():
+        hook = cls.from_url(url, session=session)
+        assert hook.id == webhook_id
+        assert hook.token == WEBHOOK_TOKEN
+
+
+def test_webhook_from_url_rejects_garbage():
+    for cls, session in _webhook_classes_with_sessions():
+        with pytest.raises(ValueError):
+            cls.from_url('https://lolka.app/api/bot/v1/webhooks/123', session=session)
+
+
+@pytest.mark.parametrize(
+    'base, origin',
+    [
+        ('https://lolka.app/api/bot', 'https://lolka.app'),
+        ('http://localhost:8080/api/bot', 'http://localhost:8080'),
+    ],
+)
+def test_webhook_url_uses_lolka_origin(monkeypatch, base, origin):
+    from lolka import http
+
+    monkeypatch.setattr(http, 'LOLKA_API_BASE', base)
+    for cls, session in _webhook_classes_with_sessions():
+        hook = cls.partial(123456789012345, WEBHOOK_TOKEN, session=session)
+        assert hook.url == f'{origin}/api/webhooks/123456789012345/{WEBHOOK_TOKEN}'

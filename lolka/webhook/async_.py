@@ -34,6 +34,7 @@ from contextvars import ContextVar
 import weakref
 
 import aiohttp
+import yarl
 
 from .. import utils
 from ..errors import HTTPException, Forbidden, NotFound, DiscordServerError
@@ -43,6 +44,7 @@ from ..user import BaseUser, User
 from ..flags import MessageFlags
 from ..asset import Asset
 from ..partial_emoji import PartialEmoji
+from .. import http as lolka_http
 from ..http import Route, handle_message_parameters, MultipartParameters, HTTPClient, json_or_text
 from ..mixins import Hashable
 from ..channel import TextChannel, ForumChannel, PartialMessageable, ForumTag
@@ -1200,7 +1202,8 @@ class Webhook(BaseWebhook):
     @property
     def url(self) -> str:
         """:class:`str` : Returns the webhook's url."""
-        return f'https://discord.com/api/webhooks/{self.id}/{self.token}'
+        origin = yarl.URL(lolka_http.LOLKA_API_BASE).origin()
+        return f'{origin}/api/webhooks/{self.id}/{self.token}'
 
     @classmethod
     def partial(
@@ -1316,7 +1319,7 @@ class Webhook(BaseWebhook):
             A partial :class:`Webhook`.
             A partial webhook is just a webhook object with an ID and a token.
         """
-        m = re.search(r'discord(?:app)?\.com/api/webhooks/(?P<id>[0-9]{15,20})/(?P<token>[A-Za-z0-9\.\-\_]{60,})', url)
+        m = re.search(r'(?:https?://)?[^\s/]+/api/webhooks/(?P<id>[0-9]{15,20})/(?P<token>[A-Za-z0-9\.\-\_]{60,})', url)
         if m is None:
             raise ValueError('Invalid webhook URL given.')
 

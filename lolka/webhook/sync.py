@@ -40,9 +40,12 @@ from urllib.parse import quote as urlquote
 from typing import Any, Dict, List, Literal, Optional, TYPE_CHECKING, Sequence, Tuple, Union, TypeVar, Type, overload
 import weakref
 
+import yarl
+
 from .. import utils
 from ..errors import HTTPException, Forbidden, NotFound, DiscordServerError
 from ..message import Message, MessageFlags
+from .. import http as lolka_http
 from ..http import Route, handle_message_parameters
 from ..channel import PartialMessageable, ForumTag
 
@@ -635,7 +638,8 @@ class SyncWebhook(BaseWebhook):
     @property
     def url(self) -> str:
         """:class:`str` : Returns the webhook's url."""
-        return f'https://discord.com/api/webhooks/{self.id}/{self.token}'
+        origin = yarl.URL(lolka_http.LOLKA_API_BASE).origin()
+        return f'{origin}/api/webhooks/{self.id}/{self.token}'
 
     @classmethod
     def partial(cls, id: int, token: str, *, session: Session = MISSING, bot_token: Optional[str] = None) -> SyncWebhook:
@@ -704,7 +708,7 @@ class SyncWebhook(BaseWebhook):
             A partial :class:`SyncWebhook`.
             A partial :class:`SyncWebhook` is just a :class:`SyncWebhook` object with an ID and a token.
         """
-        m = re.search(r'discord(?:app)?\.com/api/webhooks/(?P<id>[0-9]{15,20})/(?P<token>[A-Za-z0-9\.\-\_]{60,})', url)
+        m = re.search(r'(?:https?://)?[^\s/]+/api/webhooks/(?P<id>[0-9]{15,20})/(?P<token>[A-Za-z0-9\.\-\_]{60,})', url)
         if m is None:
             raise ValueError('Invalid webhook URL given.')
 

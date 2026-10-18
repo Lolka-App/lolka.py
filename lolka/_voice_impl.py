@@ -24,8 +24,12 @@ DEALINGS IN THE SOFTWARE.
 
 # Внутренний модуль: WebRTC voice-слой для VoiceClient.
 # lolka voice использует WebRTC (как клиенты lolka), а не Discord-voice/libsodium.
-# Импортируется ЛЕНИВО из voice_client.py, чтобы `import lolka` не требовал extras.
-# Зависит от extras "voice" (см. pyproject.toml).
+# Импортируется ЛЕНИВО из voice_client.py, чтобы `import lolka` не тянул aiortc/pymediasoup
+# до первого VoiceClient. Зависимости (aiortc, pymediasoup) входят в основной requirements.txt;
+# extra `voice` пустой и оставлен для совместимости.
+# libopus нужна только Opus-источникам (is_opus(): FFmpegOpusAudio) — они декодируются в PCM;
+# PCM-источникам не нужна (кодирование в Opus делает aiortc). На Linux/macOS libopus
+# не входит в поставку, без неё play() Opus-источника бросает OpusNotLoaded.
 
 from __future__ import annotations
 
@@ -145,7 +149,10 @@ class _Playback:
         while not prev.exited.wait(0.05):
             if self._stop.is_set():
                 # cleanup не должен идти параллельно с read() старого потока
-                prev.exited.wait(AFTER_JOIN_TIMEOUT)
+                # Замещённый читатель (cleanup=False) ждёт без таймаута: иначе в
+                # цепочке A->B->C при зависшем read() у A читатель C начнёт
+                # читать параллельно с A.
+                prev.exited.wait(AFTER_JOIN_TIMEOUT if self._cleanup else None)
                 return False
         return not self._stop.is_set()
 
