@@ -83,6 +83,17 @@ The API stays discord.py-compatible — ``await channel.connect()`` returns a
     ...
     await vc.disconnect()
 
+The track passed to ``on_receive_track`` only delivers frames from the moment it was handed over and
+keeps just the latest one, so read it (``await track.recv()`` in a loop until ``MediaStreamError``)
+or call ``track.stop()`` if you do not need it. Only audio producers are consumed (video is ignored).
+
+``after`` callbacks of ``vc.play()`` run in a helper thread, after ``source.cleanup()``, so they may
+block or call ``vc.play()`` again; use ``asyncio.run_coroutine_threadsafe(coro, vc.loop)`` to run a
+coroutine from them. ``after`` may arrive up to 2 seconds late if the source's ``read()`` hangs.
+
+If the voice connection is lost (the voice server restarted, the network dropped), the client disconnects
+and leaves the channel; ``reconnect=True`` is accepted for compatibility but reconnecting is up to the bot.
+
 Migrating from discord.py
 --------------------------
 

@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import queue
+import threading
 import time
 from fractions import Fraction
 from typing import Any, Callable, Dict, Optional
@@ -39,11 +41,14 @@ import aiohttp
 import av
 
 from aiortc import MediaStreamTrack
+from aiortc.contrib.media import MediaRelay
+from aiortc.mediastreams import MediaStreamError
 
 from pymediasoup import Device, AiortcHandler
 from pymediasoup.rtp_parameters import RtpCapabilities, RtpParameters
 from pymediasoup.models.transport import IceParameters, IceCandidate, DtlsParameters
 
+from . import opus as _opus
 from .opus import Encoder as _OpusEncoder
 from .player import AudioSource
 
@@ -56,58 +61,224 @@ SAMPLES_PER_FRAME = _OpusEncoder.SAMPLES_PER_FRAME
 FRAME_BYTES = _OpusEncoder.FRAME_SIZE
 SILENCE = b'\x00' * FRAME_BYTES
 
+# Сколько 20-мс кадров поток-читатель держит наготове (~160 мс).
+READ_AHEAD_FRAMES = 8
+# Сколько ждать завершения потока-читателя перед вызовом after.
+AFTER_JOIN_TIMEOUT = 2.0
+
+
+class _End:
+    """Сентинел в очереди кадров: источник закончился (или упал с ошибкой)."""
+
+    __slots__ = ('error', 'owner')
+
+    def __init__(self, error: Optional[Exception], owner: '_Playback') -> None:
+        self.error = error
+        # очередь может переходить к следующему _Playback (replace_source): конец
+        # чужого источника не должен останавливать новый
+        self.owner = owner
+
+
+class _Playback:
+    """Один проигрываемый источник и поток, который его читает.
+
+    ``AudioSource.read()``/``cleanup()`` блокирующие (ffmpeg-пайп, сеть), поэтому
+    читаются в отдельном потоке и складываются в ограниченную очередь; ``recv()``
+    трека забирает готовые кадры, не блокируя event loop.
+    """
+
+    def __init__(
+        self,
+        source: AudioSource,
+        after: Optional[Callable[[Optional[Exception]], Any]],
+        wait_for: Optional['_Playback'] = None,
+        frames: Optional['queue.Queue[Any]'] = None,
+    ) -> None:
+        # Декодер создаём синхронно: если libopus недоступна, OpusNotLoaded
+        # уходит вызывающему play()/set_source, а не умирает в потоке-читателе.
+        self._decoder = _opus.Decoder() if source.is_opus() else None
+        self.source = source
+        self.after = after
+        self.queue: 'queue.Queue[Any]' = (
+            frames if frames is not None else queue.Queue(maxsize=READ_AHEAD_FRAMES)
+        )
+        self.exited = threading.Event()
+        self._stop = threading.Event()
+        self._cleanup = True
+        self._cleaned = False
+        self._wait_for = wait_for
+        self._thread = threading.Thread(
+            target=self._run, name='lolka-voice-reader', daemon=True
+        )
+        self._thread.start()
+
+    def stop(self, cleanup: bool = True) -> None:
+        """Попросить поток-читатель выйти; ``cleanup`` — вызвать ``source.cleanup()``."""
+        self._cleanup = cleanup
+        self._stop.set()
+
+    def _put(self, item: Any) -> bool:
+        while not self._stop.is_set():
+            try:
+                self.queue.put(item, timeout=0.05)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _do_cleanup(self) -> None:
+        if self._cleaned:
+            return
+        self._cleaned = True
+        try:
+            self.source.cleanup()
+        except Exception:
+            _log.exception('error while cleaning up the audio source')
+
+    def _wait_prev(self) -> bool:
+        """Дождаться выхода предыдущего читателя; ``False`` — нас остановили."""
+        prev, self._wait_for = self._wait_for, None
+        if prev is None:
+            return True
+        # Предыдущий читатель мог читать тот же канал (источник-обёртка):
+        # два потока на один пайп недопустимы, ждём его выхода.
+        while not prev.exited.wait(0.05):
+            if self._stop.is_set():
+                # cleanup не должен идти параллельно с read() старого потока
+                prev.exited.wait(AFTER_JOIN_TIMEOUT)
+                return False
+        return not self._stop.is_set()
+
+    def _put_pcm(self, pcm: bytes) -> bool:
+        """Нарезать PCM на 20-мс кадры (последний дополнить тишиной)."""
+        for i in range(0, len(pcm), FRAME_BYTES):
+            piece = bytes(pcm[i : i + FRAME_BYTES])
+            if len(piece) < FRAME_BYTES:
+                piece += b'\x00' * (FRAME_BYTES - len(piece))
+            if not self._put(piece):
+                return False
+        return True
+
+    def _run(self) -> None:
+        try:
+            if not self._wait_prev():
+                return
+            while not self._stop.is_set():
+                try:
+                    pcm = self.source.read()
+                    if pcm and self._decoder is not None:
+                        pcm = self._decoder.decode(pcm)
+                        if not pcm:
+                            continue
+                except Exception as exc:
+                    end = _End(exc, self)
+                else:
+                    if pcm:
+                        if not self._put_pcm(pcm):
+                            return
+                        continue
+                    end = _End(None, self)
+                if self._stop.is_set():
+                    return
+                # cleanup строго до after: обе стороны (after и cleanup) видят
+                # источник уже освобождённым.
+                self._do_cleanup()
+                self._put(end)
+                return
+        except Exception as exc:
+            _log.exception('voice: reader thread failed')
+            self._do_cleanup()
+            self._put(_End(exc, self))
+        finally:
+            if self._cleanup and not self._cleaned:
+                self._do_cleanup()
+            self.exited.set()
+
 
 class SourceAudioTrack(MediaStreamTrack):
     """Постоянный исходящий аудио-трек для aiortc.
 
     Отдаёт 20-мс кадры из активного :class:`AudioSource`; при отсутствии
-    источника — тишину. :meth:`set_source` переключает источник без
-    пересоздания трека/producer, поэтому play()/stop()/смена source дешёвые.
-    Поддерживает как PCM-источники, так и Opus (декодирует в PCM).
+    источника (или пока читатель не успел подготовить кадр) — тишину.
+    :meth:`set_source` переключает источник без пересоздания трека/producer, поэтому
+    play()/stop()/смена source дешёвые. Поддерживает как PCM-источники, так и Opus
+    (декодирует в PCM).
+
+    Чтение источника идёт в отдельном потоке, ``after`` вызывается тоже вне
+    event loop (как у upstream, где это поток плеера). Все методы управления
+    потокобезопасны и могут вызываться из любого потока, в том числе из ``after``.
     """
 
     kind = 'audio'
 
     def __init__(self) -> None:
         super().__init__()
-        self._source: Optional[AudioSource] = None
-        self._after: Optional[Callable[[Optional[Exception]], Any]] = None
-        self._decoder = None
+        self._lock = threading.RLock()
+        self._playback: Optional[_Playback] = None
         self._paused = False
         self._samples = 0
         self._start: Optional[float] = None
+        self._played = 0
 
     def set_source(
         self,
-        source: Optional[AudioSource],
+        source: AudioSource,
         after: Optional[Callable[[Optional[Exception]], Any]] = None,
     ) -> None:
-        old = self._source
-        self._source = source
-        self._after = after
-        self._decoder = None
-        self._paused = False
-        if source is not None and source.is_opus():
-            from . import opus
+        """Начать проигрывать ``source``; текущий источник (если есть) останавливается."""
+        with self._lock:
+            old = self._playback
+            self._playback = _Playback(source, after, wait_for=old)
+            self._paused = False
+            self._played = 0
+            if old is not None:
+                old.stop(cleanup=True)
+        if old is not None:
+            self._dispatch_after(old, None)
 
-            self._decoder = opus.Decoder()
-        if old is not None and old is not source:
-            try:
-                old.cleanup()
-            except Exception:
-                pass
+    def replace_source(self, source: AudioSource) -> None:
+        """Подменить источник «на лету».
+
+        Без ``cleanup()`` прежнего источника (его может оборачивать новый, как в
+        ``vc.source = PCMVolumeTransformer(vc.source)``), с сохранением ``after``,
+        паузы и счётчика кадров. Прочитанные вперёд кадры прежнего источника доигрываются
+        (теряется максимум кадр, который читался в момент подмены). Новый читатель стартует, только когда прежний вышел из
+        своего последнего ``read()``.
+        """
+        with self._lock:
+            old = self._playback
+            if old is None:
+                raise ValueError('the client is not playing anything')
+            # прочитанные вперёд кадры прежнего читателя переходят новому
+            self._playback = _Playback(
+                source, old.after, wait_for=old, frames=old.queue
+            )
+            old.stop(cleanup=False)
 
     @property
     def source(self) -> Optional[AudioSource]:
-        return self._source
+        pb = self._playback
+        return pb.source if pb is not None else None
 
     @property
     def is_playing(self) -> bool:
-        return self._source is not None and not self._paused
+        return self._playback is not None and not self._paused
 
     @property
     def is_paused(self) -> bool:
-        return self._source is not None and self._paused
+        return self._playback is not None and self._paused
+
+    @property
+    def played_frames(self) -> int:
+        """Number of 20 ms frames of the current source that have been sent."""
+        return self._played
+
+    def stop_source(self) -> None:
+        """Stop the current source and call its ``after`` callback."""
+        with self._lock:
+            pb = self._playback
+        if pb is not None:
+            self._end(pb, None)
 
     def pause(self) -> None:
         self._paused = True
@@ -138,16 +309,30 @@ class SourceAudioTrack(MediaStreamTrack):
         self._samples = 0
         self._start = None
 
-    def _finish(self, error: Optional[Exception]) -> None:
-        after = self._after
-        self._source = None
-        self._after = None
-        self._decoder = None
-        if after is not None:
+    def _end(self, pb: _Playback, error: Optional[Exception]) -> None:
+        with self._lock:
+            if self._playback is not pb:
+                return
+            self._playback = None
+            self._paused = False
+            pb.stop(cleanup=True)
+        self._dispatch_after(pb, error)
+
+    @staticmethod
+    def _dispatch_after(pb: _Playback, error: Optional[Exception]) -> None:
+        after = pb.after
+        if after is None:
+            return
+
+        def run() -> None:
+            # after видит уже освобождённый источник (cleanup идёт в потоке-читателе)
+            pb.exited.wait(AFTER_JOIN_TIMEOUT)
             try:
                 after(error)
             except Exception:
                 _log.exception('ошибка в after-callback')
+
+        threading.Thread(target=run, name='lolka-voice-after', daemon=True).start()
 
     async def recv(self) -> 'av.AudioFrame':
         # Держим реальный темп 20 мс/кадр (иначе aiortc захлебнётся кадрами).
@@ -159,22 +344,18 @@ class SourceAudioTrack(MediaStreamTrack):
             await asyncio.sleep(delay)
 
         data = SILENCE
-        src = self._source
-        if src is not None and not self._paused:
+        pb = self._playback
+        if pb is not None and not self._paused:
             try:
-                chunk = src.read()
-                if chunk and self._decoder is not None:
-                    chunk = self._decoder.decode(chunk)
-            except Exception as exc:
-                self._finish(exc)
-                chunk = b''
-            else:
-                if not chunk:
-                    self._finish(None)
-                else:
-                    if len(chunk) < FRAME_BYTES:
-                        chunk = chunk + b'\x00' * (FRAME_BYTES - len(chunk))
-                    data = chunk[:FRAME_BYTES]
+                item = pb.queue.get_nowait()
+            except queue.Empty:
+                item = None
+            if isinstance(item, _End):
+                if item.owner is pb:
+                    self._end(pb, item.error)
+            elif item is not None:
+                data = item
+                self._played += 1
 
         frame = av.AudioFrame(format='s16', layout='stereo', samples=SAMPLES_PER_FRAME)
         frame.sample_rate = SAMPLE_RATE
@@ -192,25 +373,50 @@ class Signaling:
       request:      {id, method, data}
       response:     {id, response: true, data} | {id, response: true, error}
       notification: {notification: true, method, data}
+
+    Нотификации обрабатываются отдельными задачами: обработчик вправе слать свои
+    запросы, ответы на которые читает тот же цикл чтения.
     """
 
-    def __init__(self, url: str, on_notification: Callable[[str, dict], Any]) -> None:
+    def __init__(
+        self,
+        url: str,
+        on_notification: Callable[[str, dict], Any],
+        on_disconnect: Optional[Callable[[], Any]] = None,
+        request_timeout: float = 15.0,
+    ) -> None:
         self._url = url
         self._on_notification = on_notification
+        self._on_disconnect = on_disconnect
+        self._request_timeout = request_timeout
         self._session: Optional[aiohttp.ClientSession] = None
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._pending: Dict[int, asyncio.Future] = {}
         self._next_id = 1
         self._reader: Optional[asyncio.Task] = None
+        self._tasks: set = set()
         self._closed = False
 
     async def connect(self) -> None:
         self._session = aiohttp.ClientSession()
-        self._ws = await self._session.ws_connect(self._url, heartbeat=15)
+        try:
+            self._ws = await self._session.ws_connect(self._url, heartbeat=15)
+        except BaseException:
+            await self._session.close()
+            raise
         self._reader = asyncio.ensure_future(self._read_loop())
+
+    async def _handle_notification(self, method: Any, data: dict) -> None:
+        try:
+            await self._on_notification(method, data)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.exception('ошибка обработки нотификации %s', method)
 
     async def _read_loop(self) -> None:
         assert self._ws is not None
+        cancelled = False
         try:
             async for msg in self._ws:
                 if msg.type != aiohttp.WSMsgType.TEXT:
@@ -225,10 +431,16 @@ class Signaling:
                         else:
                             fut.set_result(obj.get('data') or {})
                 elif obj.get('notification'):
-                    try:
-                        await self._on_notification(obj.get('method'), obj.get('data') or {})
-                    except Exception:
-                        _log.exception('ошибка обработки нотификации %s', obj.get('method'))
+                    task = asyncio.ensure_future(
+                        self._handle_notification(
+                            obj.get('method'), obj.get('data') or {}
+                        )
+                    )
+                    self._tasks.add(task)
+                    task.add_done_callback(self._tasks.discard)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         except Exception:
             if not self._closed:
                 _log.exception('сигналинг: обрыв чтения')
@@ -237,24 +449,42 @@ class Signaling:
                 if not fut.done():
                     fut.set_exception(ConnectionError('signaling closed'))
             self._pending.clear()
+            if not cancelled and not self._closed and self._on_disconnect is not None:
+                try:
+                    self._on_disconnect()
+                except Exception:
+                    _log.exception('ошибка в on_disconnect сигналинга')
 
-    async def request(self, method: str, data: Optional[dict] = None, timeout: float = 15.0) -> dict:
+    async def request(
+        self, method: str, data: Optional[dict] = None, timeout: Optional[float] = None
+    ) -> dict:
         assert self._ws is not None
         rid = self._next_id
         self._next_id += 1
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[rid] = fut
-        await self._ws.send_json({'id': rid, 'method': method, 'data': data or {}})
-        return await asyncio.wait_for(fut, timeout=timeout)
+        try:
+            await self._ws.send_json({'id': rid, 'method': method, 'data': data or {}})
+            return await asyncio.wait_for(
+                fut, timeout=self._request_timeout if timeout is None else timeout
+            )
+        finally:
+            self._pending.pop(rid, None)
 
     async def close(self) -> None:
         self._closed = True
-        if self._reader is not None:
+        current = asyncio.current_task()
+        for task in list(self._tasks):
+            if task is not current:
+                task.cancel()
+        if self._reader is not None and self._reader is not current:
             self._reader.cancel()
-        if self._ws is not None:
-            await self._ws.close()
-        if self._session is not None:
-            await self._session.close()
+        try:
+            if self._ws is not None:
+                await self._ws.close()
+        finally:
+            if self._session is not None:
+                await self._session.close()
 
 
 class VoiceConnection:
@@ -262,6 +492,12 @@ class VoiceConnection:
 
     Инкапсулирует всю низкоуровневую механику; :class:`~lolka.VoiceClient` —
     тонкий фасад поверх этого класса.
+
+    ``on_closed(reason)`` вызывается, когда сессия закончилась не по инициативе
+    владельца: ``"kicked"`` (сервер выкинул пира из комнаты — например, при
+    переезде в другой канал) или ``"disconnected"`` (оборвался сигналинг). Трек
+    исходящего звука при этом остаётся живым — что с ним делать, решает владелец.
+    ``on_track_ended(producer_id)`` — producer участника закрылся.
     """
 
     def __init__(
@@ -270,10 +506,16 @@ class VoiceConnection:
         token: str,
         on_receive_track: Optional[Callable] = None,
         out_track: Optional[SourceAudioTrack] = None,
+        on_closed: Optional[Callable[[str], Any]] = None,
+        on_track_ended: Optional[Callable[[str], Any]] = None,
+        request_timeout: float = 15.0,
     ) -> None:
         self._endpoint = endpoint
         self._token = token
         self._on_receive_track = on_receive_track
+        self._on_closed = on_closed
+        self._on_track_ended = on_track_ended
+        self._request_timeout = request_timeout
 
         self.signaling: Optional[Signaling] = None
         self.device: Optional[Device] = None
@@ -285,7 +527,14 @@ class VoiceConnection:
         self.out_track: Optional[SourceAudioTrack] = out_track
         self._send_connected = asyncio.Event()
         self._recv_connected = asyncio.Event()
-        self.consumers: Dict[str, Any] = {}
+        self.consumers: Dict[str, Any] = {}  # producerId -> consumer
+        self._consumer_producers: Dict[str, str] = {}  # consumerId -> producerId
+        self._consuming: set = set()
+        self._closed_producers: set = set()
+        self._closed_consumers: set = set()
+        self._pending_close: Optional[str] = None
+        self._started = False
+        self._close_notified = False
         self._closed = False
 
     def _signaling_url(self) -> str:
@@ -295,16 +544,56 @@ class VoiceConnection:
         sep = '&' if '?' in ep else '?'
         return f'{ep}{sep}token={self._token}'
 
-    async def start(self) -> None:
-        self.signaling = Signaling(self._signaling_url(), self._on_notification)
-        await self.signaling.connect()
+    async def _request(self, method: str, data: Optional[dict] = None) -> dict:
+        sig = self.signaling
+        if sig is None:
+            raise ConnectionError('signaling closed')
+        return await sig.request(method, data, timeout=self._request_timeout)
 
-        caps = await self.signaling.request('getRouterRtpCapabilities', {})
+    def _check_open(self) -> None:
+        if self._closed:
+            raise RuntimeError('voice connection was closed while starting')
+
+    async def start(self) -> None:
+        try:
+            await self._start()
+        except BaseException as exc:
+            # Любой сбой (в том числе закрытие во время старта): добиваем всё, что
+            # успело подняться — сигналинг, транспорты, «призрачный» пир в SFU.
+            closed_meanwhile = self._closed
+            self._closed = True
+            await self._cleanup()
+            if closed_meanwhile and isinstance(exc, Exception):
+                if not isinstance(exc, RuntimeError):
+                    raise RuntimeError(
+                        'voice connection was closed while starting'
+                    ) from exc
+            raise
+        self._started = True
+        pending, self._pending_close = self._pending_close, None
+        if pending is not None:
+            self._notify_closed(pending)
+
+    async def _start(self) -> None:
+        self.signaling = Signaling(
+            self._signaling_url(),
+            self._on_notification,
+            on_disconnect=lambda: self._notify_closed('disconnected'),
+            request_timeout=self._request_timeout,
+        )
+        await self.signaling.connect()
+        self._check_open()
+
+        caps = await self._request('getRouterRtpCapabilities', {})
+        self._check_open()
         self.device = Device(handlerFactory=AiortcHandler.createFactory())
         await self.device.load(routerRtpCapabilities=RtpCapabilities(**caps))
+        self._check_open()
 
         await self._create_send_transport()
+        self._check_open()
         await self._create_recv_transport()
+        self._check_open()
 
         if self.out_track is None:
             self.out_track = SourceAudioTrack()
@@ -315,21 +604,18 @@ class VoiceConnection:
             stopTracks=False,
             appData={'source': 'mic'},
         )
+        self._check_open()
         _log.debug('voice: producer создан id=%s', self.producer.id)
 
-        res = await self.signaling.request('getProducers', {})
+        res = await self._request('getProducers', {})
+        self._check_open()
         for p in res.get('producers', []):
             await self._consume(p['producerId'], p.get('userId'), p.get('kind'))
-
-        if self._closed:
-            # Нас закрыли, пока сессия поднималась (kick/disconnect во время переезда):
-            # close() отработал по ещё пустым полям — добиваем то, что успело подняться.
-            self._closed = False
-            await self.close()
-            raise RuntimeError('voice connection was closed while starting')
+            self._check_open()
 
     async def _create_send_transport(self) -> None:
-        params = await self.signaling.request('createWebRtcTransport', {'direction': 'send'})
+        params = await self._request('createWebRtcTransport', {'direction': 'send'})
+        self._check_open()
         self.send_transport = self.device.createSendTransport(
             id=params['id'],
             iceParameters=IceParameters(**params['iceParameters']),
@@ -340,9 +626,12 @@ class VoiceConnection:
 
         @self.send_transport.on('connect')
         async def _on_connect(dtlsParameters):
-            await self.signaling.request(
+            await self._request(
                 'connectTransport',
-                {'transportId': self.send_transport.id, 'dtlsParameters': dtlsParameters.model_dump(exclude_none=True)},
+                {
+                    'transportId': self.send_transport.id,
+                    'dtlsParameters': dtlsParameters.model_dump(exclude_none=True),
+                },
             )
             self._send_connected.set()
 
@@ -350,7 +639,7 @@ class VoiceConnection:
         async def _on_produce(kind, rtpParameters, appData):
             # ждём подтверждения connectTransport, иначе produce может уйти раньше
             await self._send_connected.wait()
-            res = await self.signaling.request(
+            res = await self._request(
                 'produce',
                 {
                     'transportId': self.send_transport.id,
@@ -362,7 +651,8 @@ class VoiceConnection:
             return res['id']
 
     async def _create_recv_transport(self) -> None:
-        params = await self.signaling.request('createWebRtcTransport', {'direction': 'recv'})
+        params = await self._request('createWebRtcTransport', {'direction': 'recv'})
+        self._check_open()
         self.recv_transport = self.device.createRecvTransport(
             id=params['id'],
             iceParameters=IceParameters(**params['iceParameters']),
@@ -373,33 +663,65 @@ class VoiceConnection:
 
         @self.recv_transport.on('connect')
         async def _on_connect(dtlsParameters):
-            await self.signaling.request(
+            await self._request(
                 'connectTransport',
-                {'transportId': self.recv_transport.id, 'dtlsParameters': dtlsParameters.model_dump(exclude_none=True)},
+                {
+                    'transportId': self.recv_transport.id,
+                    'dtlsParameters': dtlsParameters.model_dump(exclude_none=True),
+                },
             )
             self._recv_connected.set()
 
     async def _consume(self, producer_id: str, user_id: Any, kind: Any) -> None:
-        if self.recv_transport is None or self.device is None or producer_id in self.consumers:
+        # Бот слушает только голос: видео-продюсеры (камера и т.п.) не потребляем,
+        # иначе aiortc зря декодирует видеопоток.
+        if kind != 'audio' or not producer_id:
             return
+        if (
+            self._closed
+            or self.recv_transport is None
+            or self.device is None
+            or producer_id in self.consumers
+            or producer_id in self._consuming
+        ):
+            return
+        # регистрируем синхронно, до первого await: producerClosed, пришедший
+        # посреди consume, увидит, что producer «в работе»
+        self._consuming.add(producer_id)
         try:
-            res = await self.signaling.request(
+            res = await self._request(
                 'consume',
                 {
                     'transportId': self.recv_transport.id,
                     'producerId': producer_id,
-                    'rtpCapabilities': self.device.rtpCapabilities.model_dump(exclude_none=True),
+                    'rtpCapabilities': self.device.rtpCapabilities.model_dump(
+                        exclude_none=True
+                    ),
                 },
             )
+            if res.get('kind') != 'audio':
+                return
             consumer = await self.recv_transport.consume(
                 id=res['id'],
                 producerId=res['producerId'],
                 kind=res['kind'],
                 rtpParameters=RtpParameters(**res['rtpParameters']),
             )
+            if (
+                self._closed
+                or producer_id in self._closed_producers
+                or consumer.id in self._closed_consumers
+            ):
+                await consumer.close()
+                return
             self.consumers[producer_id] = consumer
-            await self.signaling.request('resumeConsumer', {'consumerId': consumer.id})
-            _log.debug('voice: consume producer=%s user=%s kind=%s', producer_id, user_id, kind)
+            self._consumer_producers[consumer.id] = producer_id
+            await self._request('resumeConsumer', {'consumerId': consumer.id})
+            if self.consumers.get(producer_id) is not consumer:
+                return  # закрыт, пока шёл resume
+            _log.debug(
+                'voice: consume producer=%s user=%s kind=%s', producer_id, user_id, kind
+            )
             if self._on_receive_track is not None:
                 try:
                     self._on_receive_track(consumer.track, user_id, producer_id)
@@ -407,25 +729,83 @@ class VoiceConnection:
                     _log.exception('ошибка on_receive_track')
         except Exception:
             _log.exception('voice: ошибка consume producer=%s', producer_id)
+        finally:
+            self._consuming.discard(producer_id)
+            self._closed_producers.discard(producer_id)
+            if not self._consuming:
+                self._closed_consumers.clear()
+
+    async def _drop_consumer(self, producer_id: Optional[str]) -> None:
+        """Producer участника закрылся: закрываем consumer, сообщаем владельцу."""
+        if not producer_id:
+            return
+        if producer_id in self._consuming:
+            self._closed_producers.add(producer_id)
+        consumer = self.consumers.pop(producer_id, None)
+        if consumer is None:
+            return
+        self._consumer_producers.pop(consumer.id, None)
+        try:
+            await consumer.close()
+        except Exception:
+            _log.exception('voice: ошибка закрытия consumer producer=%s', producer_id)
+        if self._on_track_ended is not None:
+            try:
+                self._on_track_ended(producer_id)
+            except Exception:
+                _log.exception('ошибка on_track_ended')
+
+    def _notify_closed(self, reason: str) -> None:
+        if self._closed or self._close_notified:
+            return
+        if not self._started:
+            # закрытие во время start(): сообщим владельцу, когда сессия поднимется
+            if self._pending_close is None:
+                self._pending_close = reason
+            return
+        self._close_notified = True
+        if self._on_closed is not None:
+            try:
+                self._on_closed(reason)
+            except Exception:
+                _log.exception('ошибка on_closed')
 
     async def _on_notification(self, method: str, data: dict) -> None:
         _log.debug('voice: нотификация %s %s', method, data)
         if method == 'newProducer':
-            await self._consume(data.get('producerId'), data.get('userId'), data.get('kind'))
-        elif method in ('consumerClosed', 'producerClosed'):
-            pid = data.get('producerId')
-            if pid:
-                self.consumers.pop(pid, None)
+            await self._consume(
+                data.get('producerId'), data.get('userId'), data.get('kind')
+            )
+        elif method == 'producerClosed':
+            await self._drop_consumer(data.get('producerId'))
+        elif method == 'consumerClosed':
+            consumer_id = data.get('consumerId')
+            producer_id = self._consumer_producers.get(consumer_id)
+            if producer_id is None and self._consuming and consumer_id:
+                # consumer ещё создаётся (recv_transport.consume): закроем после
+                self._closed_consumers.add(consumer_id)
+            await self._drop_consumer(producer_id)
         elif method == 'kicked':
-            await self.close()
+            self._notify_closed('kicked')
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        await self._cleanup()
+
+    async def _cleanup(self) -> None:
+        """Освобождает всё, что успело подняться; безопасно вызывать повторно."""
+        consumers = list(self.consumers.values())
         self.consumers.clear()
+        self._consumer_producers.clear()
         if self.out_track is not None:
-            self.out_track.set_source(None)
+            self.out_track.stop_source()
+        for consumer in consumers:
+            try:
+                await consumer.close()
+            except Exception:
+                pass
         for tr in (self.send_transport, self.recv_transport):
             if tr is not None:
                 try:
@@ -437,9 +817,22 @@ class VoiceConnection:
         # Трек всё ещё наш (его не забрали в новую сессию) — завершаем окончательно.
         if self.out_track is not None:
             self.out_track.end()
-        if self.signaling is not None:
+        signaling, self.signaling = self.signaling, None
+        if signaling is not None:
             try:
-                await self.signaling.close()
+                await signaling.close()
             except Exception:
                 pass
-            self.signaling = None
+
+
+async def drain_track(track: MediaStreamTrack) -> None:
+    """Read and discard frames until the track ends.
+
+    aiortc keeps every decoded frame of a received track in an unbounded queue
+    until it is read; draining keeps memory flat when nobody consumes the track.
+    """
+    while True:
+        try:
+            await track.recv()
+        except MediaStreamError:
+            return
