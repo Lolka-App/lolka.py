@@ -185,7 +185,7 @@ class VoiceClient(VoiceProtocol):
     e.g. :meth:`VoiceChannel.connect`.
 
     Voice in lolka works over WebRTC (not Discord UDP/libsodium), so it requires
-    the WebRTC voice dependencies (aiortc, pymediasoup), which ship with the base
+    the WebRTC voice dependencies, which ship with the base
     install of ``lolka.py``. The public interface stays compatible with
     discord.py's :class:`VoiceClient`, so existing bots keep working after
     ``import lolka as discord``.
@@ -233,7 +233,7 @@ class VoiceClient(VoiceProtocol):
             from . import _voice_impl as _ms
         except ImportError as exc:
             raise RuntimeError(
-                'voice requires aiortc and pymediasoup: reinstall "lolka.py"'
+                'voice requires the WebRTC voice dependencies: reinstall "lolka.py"'
             ) from exc
 
         super().__init__(client, channel)

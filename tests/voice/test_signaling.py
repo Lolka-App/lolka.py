@@ -41,7 +41,7 @@ pytestmark = pytest.mark.asyncio
 
 
 class FakeServer:
-    """In-process stand-in for the mediasoup signaling WebSocket."""
+    """In-process stand-in for the voice server signaling WebSocket."""
 
     def __init__(self):
         self.requests = []

@@ -24,8 +24,8 @@ DEALINGS IN THE SOFTWARE.
 
 # Внутренний модуль: WebRTC voice-слой для VoiceClient.
 # lolka voice использует WebRTC (как клиенты lolka), а не Discord-voice/libsodium.
-# Импортируется ЛЕНИВО из voice_client.py, чтобы `import lolka` не тянул aiortc/pymediasoup
-# до первого VoiceClient. Зависимости (aiortc, pymediasoup) входят в основной requirements.txt;
+# Импортируется ЛЕНИВО из voice_client.py, чтобы `import lolka` не тянул зависимости голоса
+# до первого VoiceClient. Зависимости голоса входят в основной requirements.txt;
 # extra `voice` пустой и оставлен для совместимости.
 # libopus нужна только Opus-источникам (is_opus(): FFmpegOpusAudio) — они декодируются в PCM;
 # PCM-источникам не нужна (кодирование в Opus делает aiortc). На Linux/macOS libopus
