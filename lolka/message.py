@@ -796,7 +796,9 @@ class MessageInteraction(Hashable):
     @property
     def created_at(self) -> datetime.datetime:
         """:class:`datetime.datetime`: The interaction's creation time in UTC."""
-        return utils.snowflake_time(self.id)
+        # interaction ID сервер генерит в Discord-раскладке (ради ванильного discord.py),
+        # поэтому декодируем его по Discord-раскладке, а не по lolka-раскладке.
+        return utils._discord_snowflake_time(self.id)
 
 
 class MessageInteractionMetadata(Hashable):
@@ -908,7 +910,9 @@ class MessageInteractionMetadata(Hashable):
     @property
     def created_at(self) -> datetime.datetime:
         """:class:`datetime.datetime`: The interaction's creation time in UTC."""
-        return utils.snowflake_time(self.id)
+        # interaction ID сервер генерит в Discord-раскладке (ради ванильного discord.py),
+        # поэтому декодируем его по Discord-раскладке, а не по lolka-раскладке.
+        return utils._discord_snowflake_time(self.id)
 
     @property
     def original_response_message(self) -> Optional[Message]:

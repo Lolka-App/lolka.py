@@ -2302,12 +2302,12 @@ class Client:
     async def fetch_template(self, code: Union[Template, str]) -> Template:
         """|coro|
 
-        Gets a :class:`.Template` from a lolka.new URL or code.
+        Gets a :class:`.Template` from a discord.new URL or code.
 
         Parameters
         -----------
         code: Union[:class:`.Template`, :class:`str`]
-            The Discord Template Code or URL (must be a lolka.new URL).
+            The Discord Template Code or URL (must be a discord.new URL).
 
         Raises
         -------

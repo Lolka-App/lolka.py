@@ -18,3 +18,4 @@ docs/crowdin.py
 build/*
 uv.lock*
 pylock*.toml
+.DS_Store

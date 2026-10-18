@@ -140,7 +140,7 @@ class ConverterTransformer(app_commands.Transformer):
         except AttributeError:
             pass
         else:
-            if module is not None and (module.startswith('discord.') and not module.endswith('converter')):
+            if module is not None and (module.startswith('lolka.') and not module.endswith('converter')):
                 self.converter = CONVERTER_MAPPING.get(converter, converter)
 
     async def transform(self, interaction: lolka.Interaction, value: str, /) -> Any:

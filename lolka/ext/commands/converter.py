@@ -1339,7 +1339,7 @@ async def _actual_conversion(ctx: Context[BotT], converter: Any, argument: str, 
     except AttributeError:
         pass
     else:
-        if module is not None and (module.startswith('discord.') and not module.endswith('converter')):
+        if module is not None and (module.startswith('lolka.') and not module.endswith('converter')):
             converter = CONVERTER_MAPPING.get(converter, converter)
 
     try:
