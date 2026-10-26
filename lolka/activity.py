@@ -31,6 +31,7 @@ from .asset import Asset
 from .enums import ActivityType, StatusDisplayType, try_enum
 from .colour import Colour
 from .partial_emoji import PartialEmoji
+from . import utils
 from .utils import _get_as_snowflake
 
 __all__ = (
@@ -343,7 +344,7 @@ class Activity(BaseActivity):
 
     def _image_url(self, image: str) -> Optional[str]:
         if image.startswith('mp:'):
-            return f'https://media.discordapp.net/{image[3:]}'
+            return f'{utils.LOLKA_CDN}/{image[3:]}'
         elif self.application_id is not None:
             return Asset.BASE + f'/app-assets/{self.application_id}/{image}.png'
 

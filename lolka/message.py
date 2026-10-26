@@ -718,8 +718,9 @@ class MessageReference:
 
         .. versionadded:: 1.7
         """
-        guild_id = self.guild_id if self.guild_id is not None else '@me'
-        return f'https://discord.com/channels/{guild_id}/{self.channel_id}/{self.message_id}'
+        if self.guild_id is None:
+            return f'{utils.LOLKA_WEB}/me/channels/{self.channel_id}/{self.message_id}'
+        return f'{utils.LOLKA_WEB}/servers/{self.guild_id}/channels/{self.channel_id}/{self.message_id}'
 
     def __repr__(self) -> str:
         return f'<MessageReference message_id={self.message_id!r} channel_id={self.channel_id!r} guild_id={self.guild_id!r}>'
@@ -1232,8 +1233,10 @@ class PartialMessage(Hashable):
     @property
     def jump_url(self) -> str:
         """:class:`str`: Returns a URL that allows the client to jump to this message."""
-        guild_id = getattr(self.guild, 'id', '@me')
-        return f'https://discord.com/channels/{guild_id}/{self.channel.id}/{self.id}'
+        guild_id = getattr(self.guild, 'id', None) or getattr(self.channel, 'guild_id', None)
+        if guild_id is None:
+            return f'{utils.LOLKA_WEB}/me/channels/{self.channel.id}/{self.id}'
+        return f'{utils.LOLKA_WEB}/servers/{guild_id}/channels/{self.channel.id}/{self.id}'
 
     @property
     def thread(self) -> Optional[Thread]:
@@ -2277,6 +2280,8 @@ class Message(PartialMessage, Hashable):
             self.reference = None
         else:
             self.reference = ref = MessageReference.with_state(state, ref)
+            if ref.guild_id is None and ref.channel_id == channel.id:
+                ref.guild_id = self.guild.id if self.guild else getattr(channel, 'guild_id', None)
             try:
                 resolved = data['referenced_message']  # pyright: ignore[reportTypedDictNotRequiredAccess]
             except KeyError:
@@ -2460,10 +2465,8 @@ class Message(PartialMessage, Hashable):
                 self.author = found
 
     def _handle_member(self, member: MemberPayload) -> None:
-        # The gateway now gives us full Member objects sometimes with the following keys
-        # deaf, mute, joined_at, roles
-        # For the sake of performance I'm going to assume that the only
-        # field that needs *updating* would be the joined_at field.
+        # The member payload may carry joined_at, roles, flags and (when present) the guild
+        # avatar, banner and avatar decoration; Member._update_from_message refreshes them.
         # If there is no Member object (for some strange reason), then we can upgrade
         # ourselves to a more "partial" member object.
         author = self.author

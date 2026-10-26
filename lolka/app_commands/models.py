@@ -39,6 +39,7 @@ from ..enums import (
 )
 import array
 from ..mixins import Hashable
+from .. import utils
 from ..utils import _get_as_snowflake, parse_time, snowflake_time, MISSING
 from ..object import Object
 from ..role import Role
@@ -725,7 +726,7 @@ class AppCommandChannel(Hashable):
 
         .. versionadded:: 2.6
         """
-        return f'https://discord.com/channels/{self.guild_id}/{self.id}'
+        return f'{utils.LOLKA_WEB}/servers/{self.guild_id}/channels/{self.id}'
 
     @property
     def created_at(self) -> datetime:
@@ -934,7 +935,7 @@ class AppCommandThread(Hashable):
 
         .. versionadded:: 2.6
         """
-        return f'https://discord.com/channels/{self.guild_id}/{self.id}'
+        return f'{utils.LOLKA_WEB}/servers/{self.guild_id}/channels/{self.id}'
 
     @property
     def created_at(self) -> Optional[datetime]:

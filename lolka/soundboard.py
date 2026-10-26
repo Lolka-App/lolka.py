@@ -31,7 +31,7 @@ from .mixins import Hashable
 from .partial_emoji import PartialEmoji, _EmojiTag
 from .user import User
 from .utils import MISSING
-from .asset import Asset, AssetMixin
+from .asset import AssetMixin
 
 if TYPE_CHECKING:
     import datetime
@@ -97,7 +97,7 @@ class BaseSoundboardSound(Hashable, AssetMixin):
     @property
     def url(self) -> str:
         """:class:`str`: Returns the URL of the sound."""
-        return f'{Asset.BASE}/soundboard-sounds/{self.id}'
+        return f'{utils.LOLKA_CDN}/soundboard/{self.id}.ogg'
 
 
 class SoundboardDefaultSound(BaseSoundboardSound):

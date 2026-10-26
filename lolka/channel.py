@@ -3279,7 +3279,7 @@ class DMChannel(lolka.abc.Messageable, lolka.abc.PrivateChannel, Hashable):
 
         .. versionadded:: 2.0
         """
-        return f'https://discord.com/channels/@me/{self.id}'
+        return f'{utils.LOLKA_WEB}/me/channels/{self.id}'
 
     @property
     def created_at(self) -> datetime.datetime:
@@ -3458,7 +3458,7 @@ class GroupChannel(lolka.abc.Messageable, lolka.abc.PrivateChannel, Hashable):
 
         .. versionadded:: 2.0
         """
-        return f'https://discord.com/channels/@me/{self.id}'
+        return f'{utils.LOLKA_WEB}/me/channels/{self.id}'
 
     def permissions_for(self, obj: Snowflake, /) -> Permissions:
         """Handles permission resolution for a :class:`User`.
@@ -3576,8 +3576,8 @@ class PartialMessageable(lolka.abc.Messageable, Hashable):
     def jump_url(self) -> str:
         """:class:`str`: Returns a URL that allows the client to jump to the channel."""
         if self.guild_id is None:
-            return f'https://discord.com/channels/@me/{self.id}'
-        return f'https://discord.com/channels/{self.guild_id}/{self.id}'
+            return f'{utils.LOLKA_WEB}/me/channels/{self.id}'
+        return f'{utils.LOLKA_WEB}/servers/{self.guild_id}/channels/{self.id}'
 
     @property
     def created_at(self) -> datetime.datetime:

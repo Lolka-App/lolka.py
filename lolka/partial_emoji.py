@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, TYPE_CHECKING, Union
 import re
 
-from .asset import Asset, AssetMixin
+from .asset import AssetMixin
 from . import utils
 
 # fmt: off
@@ -255,8 +255,7 @@ class PartialEmoji(_EmojiTag, AssetMixin):
         if self.is_unicode_emoji():
             return ''
 
-        end = 'webp?animated=true' if self.animated else 'png'
-        return f'{Asset.BASE}/emojis/{self.id}.{end}'
+        return f'{utils.LOLKA_CDN}/emojis/{self.id}.webp'
 
     async def read(self) -> bytes:
         """|coro|

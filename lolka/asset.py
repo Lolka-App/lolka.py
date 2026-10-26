@@ -39,9 +39,9 @@ __all__ = (
 )
 # fmt: on
 
-# Lolka: базовый URL нашего CDN для системных ассетов (дефолтные аватарки).
-# Переопределяется переменной окружения LOLKA_CDN (по аналогии с LOLKA_API_BASE / LOLKA_GATEWAY).
-LOLKA_CDN: str = os.environ.get('LOLKA_CDN', 'https://cdn.lolka.app').rstrip('/')
+# Lolka: базовый URL нашего CDN для ассетов. Переопределяется переменной окружения LOLKA_CDN
+# (по аналогии с LOLKA_API_BASE / LOLKA_GATEWAY), значение живёт в utils.
+LOLKA_CDN: str = utils.LOLKA_CDN
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -211,7 +211,7 @@ class Asset(AssetMixin):
         '_key',
     )
 
-    BASE = 'https://cdn.discordapp.com'
+    BASE = LOLKA_CDN
 
     def __init__(self, state: _State, *, url: str, key: str, animated: bool = False) -> None:
         self._state: _State = state
@@ -221,22 +221,28 @@ class Asset(AssetMixin):
 
     @staticmethod
     def _is_full_url(value: object) -> bool:
-        # lolka bot API отдаёт готовый CDN-URL (cdn.lolka.app / MinIO) в полях
-        # avatar/icon/banner вместо Discord-хэша. Распознаём такой случай.
-        return isinstance(value, str) and value.startswith(('http://', 'https://'))
+        # lolka bot API отдаёт готовый CDN-URL (cdn.lolka.app) либо ключ объекта в CDN
+        # (``avatars/{uid}/{uuid}.webp``) вместо Discord-хэша. Discord-хэши никогда не содержат '/'.
+        return isinstance(value, str) and (value.startswith(('http://', 'https://')) or '/' in value)
 
     @classmethod
-    def _lolka_url(cls, state: _State, url: str) -> Self:
-        # Готовый URL используем как есть (без склейки с BASE и без ?size=/формата).
-        animated = url.lower().split('?', 1)[0].endswith(('.gif', '.apng'))
-        return cls(state, url=url, key=url, animated=animated)
+    def _lolka_url(cls, state: _State, value: str, *, animated: bool = False) -> Self:
+        # Полный URL используем как есть, ключ CDN достраиваем до {CDN}/{key}.
+        # CDN без ресайза: ни ?size=, ни смены формата не применяем.
+        if value.startswith(('http://', 'https://')):
+            url = value
+        else:
+            value = value.lstrip('/')
+            url = f'{utils.LOLKA_CDN}/{value}'
+        animated = animated or url.lower().split('?', 1)[0].endswith(('_animated.webp', '.gif', '.apng'))
+        return cls(state, url=url, key=value, animated=animated)
 
     @classmethod
     def _from_default_avatar(cls, state: _State, index: int) -> Self:
         # Lolka: свои дефолтные аватарки system/avatars/{0..5}.jpg вместо Discord embed/avatars.
         return cls(
             state,
-            url=f'{LOLKA_CDN}/system/avatars/{index}.jpg',
+            url=f'{utils.LOLKA_CDN}/system/avatars/{index}.jpg',
             key=str(index),
             animated=False,
         )
@@ -282,6 +288,8 @@ class Asset(AssetMixin):
 
     @classmethod
     def _from_avatar_decoration(cls, state: _State, avatar_decoration: str) -> Self:
+        if cls._is_full_url(avatar_decoration):
+            return cls._lolka_url(state, avatar_decoration)
         return cls(
             state,
             url=f'{cls.BASE}/avatar-decoration-presets/{avatar_decoration}.png?size=96',
@@ -304,6 +312,8 @@ class Asset(AssetMixin):
     def _from_app_icon(
         cls, state: _State, object_id: int, icon_hash: str, asset_type: Literal['icon', 'cover_image']
     ) -> Self:
+        if cls._is_full_url(icon_hash):
+            return cls._lolka_url(state, icon_hash)
         return cls(
             state,
             url=f'{cls.BASE}/app-icons/{object_id}/{asset_type}.png?size=1024',
@@ -313,6 +323,8 @@ class Asset(AssetMixin):
 
     @classmethod
     def _from_cover_image(cls, state: _State, object_id: int, cover_image_hash: str) -> Self:
+        if cls._is_full_url(cover_image_hash):
+            return cls._lolka_url(state, cover_image_hash)
         return cls(
             state,
             url=f'{cls.BASE}/app-assets/{object_id}/store/{cover_image_hash}.png?size=1024',
@@ -322,6 +334,8 @@ class Asset(AssetMixin):
 
     @classmethod
     def _from_scheduled_event_cover_image(cls, state: _State, scheduled_event_id: int, cover_image_hash: str) -> Self:
+        if cls._is_full_url(cover_image_hash):
+            return cls._lolka_url(state, cover_image_hash)
         return cls(
             state,
             url=f'{cls.BASE}/guild-events/{scheduled_event_id}/{cover_image_hash}.png?size=1024',
@@ -356,7 +370,9 @@ class Asset(AssetMixin):
         )
 
     @classmethod
-    def _from_sticker_banner(cls, state: _State, banner: int) -> Self:
+    def _from_sticker_banner(cls, state: _State, banner: Union[int, str]) -> Self:
+        if cls._is_full_url(banner):
+            return cls._lolka_url(state, str(banner))
         return cls(
             state,
             url=f'{cls.BASE}/app-assets/710982414301790216/store/{banner}.png',
@@ -379,6 +395,8 @@ class Asset(AssetMixin):
 
     @classmethod
     def _from_primary_guild(cls, state: _State, guild_id: int, icon_hash: str) -> Self:
+        if cls._is_full_url(icon_hash):
+            return cls._lolka_url(state, icon_hash)
         return cls(
             state,
             url=f'{cls.BASE}/guild-tag-badges/{guild_id}/{icon_hash}.png?size=64',
@@ -388,6 +406,8 @@ class Asset(AssetMixin):
 
     @classmethod
     def _from_user_collectible(cls, state: _State, asset: str, animated: bool = False) -> Self:
+        if cls._is_full_url(asset):
+            return cls._lolka_url(state, asset, animated=animated)
         name = 'static.png' if not animated else 'asset.webm'
         return cls(
             state,
@@ -435,6 +455,11 @@ class Asset(AssetMixin):
     ) -> Self:
         """Returns a new asset with the passed components replaced.
 
+        .. note::
+
+            The Lolka CDN does not resize or convert images, so the URL of the
+            returned asset is the same as this one. Arguments are still validated.
+
 
         .. versionchanged:: 2.0
             ``static_format`` is now preferred over ``format``
@@ -465,9 +490,6 @@ class Asset(AssetMixin):
         :class:`Asset`
             The newly updated asset.
         """
-        url = yarl.URL(self._url)
-        path, _ = os.path.splitext(url.path)
-
         if format is not MISSING:
             if self._animated:
                 if format not in VALID_ASSET_FORMATS:
@@ -475,25 +497,24 @@ class Asset(AssetMixin):
             else:
                 if static_format is MISSING and format not in VALID_STATIC_FORMATS:
                     raise ValueError(f'format must be one of {VALID_STATIC_FORMATS}')
-            url = url.with_path(f'{path}.{format}')
 
         if static_format is not MISSING and not self._animated:
             if static_format not in VALID_STATIC_FORMATS:
                 raise ValueError(f'static_format must be one of {VALID_STATIC_FORMATS}')
-            url = url.with_path(f'{path}.{static_format}')
 
-        if size is not MISSING:
-            if not utils.valid_icon_size(size):
-                raise ValueError('size must be a power of 2 between 16 and 4096')
-            url = url.with_query(size=size)
-        else:
-            url = url.with_query(url.raw_query_string)
+        if size is not MISSING and not utils.valid_icon_size(size):
+            raise ValueError('size must be a power of 2 between 16 and 4096')
 
-        url = str(url)
-        return self.__class__(state=self._state, url=url, key=self._key, animated=self._animated)
+        # Lolka: CDN отдаёт только webp без ресайза, поэтому URL остаётся прежним.
+        return self.__class__(state=self._state, url=self._url, key=self._key, animated=self._animated)
 
     def with_size(self, size: int, /) -> Self:
         """Returns a new asset with the specified size.
+
+        .. note::
+
+            The Lolka CDN does not resize or convert images, so the URL of the
+            returned asset is the same as this one. Arguments are still validated.
 
         .. versionchanged:: 2.0
             This function will now raise :exc:`ValueError` instead of
@@ -517,11 +538,15 @@ class Asset(AssetMixin):
         if not utils.valid_icon_size(size):
             raise ValueError('size must be a power of 2 between 16 and 4096')
 
-        url = str(yarl.URL(self._url).with_query(size=size))
-        return self.__class__(state=self._state, url=url, key=self._key, animated=self._animated)
+        return self.__class__(state=self._state, url=self._url, key=self._key, animated=self._animated)
 
     def with_format(self, format: ValidAssetFormatTypes, /) -> Self:
         """Returns a new asset with the specified format.
+
+        .. note::
+
+            The Lolka CDN does not resize or convert images, so the URL of the
+            returned asset is the same as this one. Arguments are still validated.
 
         .. versionchanged:: 2.0
             This function will now raise :exc:`ValueError` instead of
@@ -550,10 +575,7 @@ class Asset(AssetMixin):
             if format not in VALID_STATIC_FORMATS:
                 raise ValueError(f'format must be one of {VALID_STATIC_FORMATS}')
 
-        url = yarl.URL(self._url)
-        path, _ = os.path.splitext(url.path)
-        url = str(url.with_path(f'{path}.{format}').with_query(url.raw_query_string))
-        return self.__class__(state=self._state, url=url, key=self._key, animated=self._animated)
+        return self.__class__(state=self._state, url=self._url, key=self._key, animated=self._animated)
 
     def with_static_format(self, format: ValidStaticFormatTypes, /) -> Self:
         """Returns a new asset with the specified static format.

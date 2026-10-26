@@ -4142,7 +4142,7 @@ class Guild(Hashable):
         """
         if self.vanity_url_code is None:
             return None
-        return f'{Invite.BASE}/{self.vanity_url_code}'
+        return f'{utils.LOLKA_INVITE}/{self.vanity_url_code}'
 
     async def vanity_invite(self) -> Optional[Invite]:
         """|coro|

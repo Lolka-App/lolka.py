@@ -622,7 +622,7 @@ class GuildChannel:
 
         .. versionadded:: 2.0
         """
-        return f'https://discord.com/channels/{self.guild.id}/{self.id}'
+        return f'{utils.LOLKA_WEB}/servers/{self.guild.id}/channels/{self.id}'
 
     @property
     def created_at(self) -> datetime:

@@ -28,6 +28,7 @@ import unicodedata
 
 from .mixins import Hashable
 from .asset import Asset, AssetMixin
+from . import utils
 from .utils import cached_slot_property, snowflake_time, get, MISSING, _get_as_snowflake
 from .enums import StickerType, StickerFormatType, try_enum
 
@@ -202,9 +203,9 @@ class StickerItem(_StickerTag):
         self.id: int = int(data['id'])
         self.format: StickerFormatType = try_enum(StickerFormatType, data['format_type'])
         if self.format is StickerFormatType.gif:
-            self.url: str = f'https://media.discordapp.net/stickers/{self.id}.gif'
+            self.url: str = f'{utils.LOLKA_CDN}/stickers/{self.id}.gif'
         else:
-            self.url: str = f'{Asset.BASE}/stickers/{self.id}.{self.format.file_extension}'
+            self.url: str = f'{utils.LOLKA_CDN}/stickers/{self.id}.{self.format.file_extension}'
 
     def __repr__(self) -> str:
         return f'<StickerItem id={self.id} name={self.name!r} format={self.format}>'
@@ -277,9 +278,9 @@ class Sticker(_StickerTag):
         self.description: str = data['description']
         self.format: StickerFormatType = try_enum(StickerFormatType, data['format_type'])
         if self.format is StickerFormatType.gif:
-            self.url: str = f'https://media.discordapp.net/stickers/{self.id}.gif'
+            self.url: str = f'{utils.LOLKA_CDN}/stickers/{self.id}.gif'
         else:
-            self.url: str = f'{Asset.BASE}/stickers/{self.id}.{self.format.file_extension}'
+            self.url: str = f'{utils.LOLKA_CDN}/stickers/{self.id}.{self.format.file_extension}'
 
     def __repr__(self) -> str:
         return f'<Sticker id={self.id} name={self.name!r}>'

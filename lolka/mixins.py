@@ -22,6 +22,8 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
+from .utils import LOLKA_SNOWFLAKE_SHIFT
+
 __all__ = (
     'EqualityComparable',
     'Hashable',
@@ -43,4 +45,4 @@ class Hashable(EqualityComparable):
     __slots__ = ()
 
     def __hash__(self) -> int:
-        return self.id >> 22
+        return self.id >> LOLKA_SNOWFLAKE_SHIFT

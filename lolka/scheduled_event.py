@@ -31,6 +31,7 @@ from .asset import Asset
 from .enums import EventStatus, EntityType, PrivacyLevel, try_enum
 from .mixins import Hashable
 from .object import Object, OLDEST_OBJECT
+from . import utils
 from .utils import parse_time, _get_as_snowflake, _bytes_to_base64_data, MISSING
 
 if TYPE_CHECKING:
@@ -183,8 +184,11 @@ class ScheduledEvent(Hashable):
 
     @property
     def url(self) -> str:
-        """:class:`str`: The url for the scheduled event."""
-        return f'https://discord.com/events/{self.guild_id}/{self.id}'
+        """:class:`str`: The url for the scheduled event.
+
+        Lolka has no scheduled event pages, so this links to the guild.
+        """
+        return f'{utils.LOLKA_WEB}/servers/{self.guild_id}'
 
     async def __modify_status(self, status: EventStatus, reason: Optional[str], /) -> ScheduledEvent:
         payload = {'status': status.value}

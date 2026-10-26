@@ -309,8 +309,6 @@ class Member(lolka.abc.Messageable, _UserTag):
         banner: Optional[Asset]
         accent_color: Optional[Colour]
         accent_colour: Optional[Colour]
-        avatar_decoration: Optional[Asset]
-        avatar_decoration_sku_id: Optional[int]
         primary_guild: PrimaryGuild
         collectibles: List[Collectible]
 
@@ -328,7 +326,7 @@ class Member(lolka.abc.Messageable, _UserTag):
         self._avatar: Optional[str] = data.get('avatar')
         self._banner: Optional[str] = data.get('banner')
         self._permissions: Optional[int]
-        self._flags: int = data['flags']
+        self._flags: int = data.get('flags', 0)
         self._avatar_decoration_data: Optional[AvatarDecorationData] = data.get('avatar_decoration_data')
         try:
             self._permissions = int(data['permissions'])  # pyright: ignore[reportTypedDictNotRequiredAccess]
@@ -378,6 +376,12 @@ class Member(lolka.abc.Messageable, _UserTag):
         self.pending = data.get('pending', False)
         self.timed_out_until = utils.parse_time(data.get('communication_disabled_until'))
         self._flags = data.get('flags', 0)
+        if 'avatar' in data:
+            self._avatar = data['avatar']
+        if 'banner' in data:
+            self._banner = data['banner']
+        if 'avatar_decoration_data' in data:
+            self._avatar_decoration_data = data['avatar_decoration_data']
 
     @classmethod
     def _try_upgrade(cls, *, data: UserWithMemberPayload, guild: Guild, state: ConnectionState) -> Union[User, Self]:
@@ -455,7 +459,7 @@ class Member(lolka.abc.Messageable, _UserTag):
             u._avatar,
             u.global_name,
             u._public_flags,
-            u._avatar_decoration_data['sku_id'] if u._avatar_decoration_data is not None else None,
+            u._avatar_decoration_data.get('sku_id') if u._avatar_decoration_data is not None else None,
             u._primary_guild,
         )
 
@@ -468,7 +472,7 @@ class Member(lolka.abc.Messageable, _UserTag):
             user['avatar'],
             user.get('global_name'),
             user.get('public_flags', 0),
-            decoration_payload['sku_id'] if decoration_payload is not None else None,
+            decoration_payload.get('sku_id') if decoration_payload is not None else None,
             primary_guild_payload,
         )
         if original != modified:
@@ -614,6 +618,30 @@ class Member(lolka.abc.Messageable, _UserTag):
         is returned instead.
         """
         return self.nick or self.global_name or self.name
+
+    @property
+    def avatar_decoration(self) -> Optional[Asset]:
+        """Optional[:class:`Asset`]: Returns an :class:`Asset` for the avatar decoration the member has.
+
+        If the member has a guild-specific avatar decoration, it takes priority over
+        the user's one. If neither is set, ``None`` is returned.
+        """
+        data = self._avatar_decoration_data
+        if data is not None and data.get('asset'):
+            return Asset._from_avatar_decoration(self._state, data['asset'])
+        return self._user.avatar_decoration
+
+    @property
+    def avatar_decoration_sku_id(self) -> Optional[int]:
+        """Optional[:class:`int`]: Returns the SKU ID of the avatar decoration the member has.
+
+        If the member has a guild-specific avatar decoration, it takes priority over
+        the user's one. If neither is set, ``None`` is returned.
+        """
+        data = self._avatar_decoration_data
+        if data is not None and data.get('asset'):
+            return utils._get_as_snowflake(data, 'sku_id')
+        return self._user.avatar_decoration_sku_id
 
     @property
     def display_avatar(self) -> Asset:

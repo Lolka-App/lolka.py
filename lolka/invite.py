@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Union, TYPE_CHECKING
 from .asset import Asset
+from . import utils
 from .utils import parse_time, snowflake_time, _get_as_snowflake
 from .object import Object
 from .mixins import Hashable
@@ -223,7 +224,7 @@ class PartialInviteGuild:
         """
         if self.vanity_url_code is None:
             return None
-        return f'{Invite.BASE}/{self.vanity_url_code}'
+        return f'{utils.LOLKA_INVITE}/{self.vanity_url_code}'
 
     @property
     def icon(self) -> Optional[Asset]:
@@ -384,7 +385,8 @@ class Invite(Hashable):
         '_flags',
     )
 
-    BASE = 'https://discord.gg'
+    # Оставлен для совместимости: фактический хост берётся из utils.LOLKA_INVITE в момент вызова.
+    BASE = utils.LOLKA_INVITE
 
     def __init__(
         self,
@@ -522,7 +524,7 @@ class Invite(Hashable):
     @property
     def url(self) -> str:
         """:class:`str`: A property that retrieves the invite URL."""
-        url = self.BASE + '/' + self.code
+        url = f'{utils.LOLKA_INVITE}/{self.code}'
         if self.scheduled_event_id is not None:
             url += '?event=' + str(self.scheduled_event_id)
         return url

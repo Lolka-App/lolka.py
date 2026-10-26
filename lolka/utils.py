@@ -121,6 +121,12 @@ __all__ = (
 # Имя DISCORD_EPOCH сохранено ради внутренних ссылок (значение — lolka-эпоха).
 DISCORD_EPOCH = 1735689600000
 LOLKA_SNOWFLAKE_SHIFT = 14
+
+# Lolka: базовые URL CDN, веб-клиента и коротких инвайтов. Переопределяются переменными
+# окружения (по аналогии с LOLKA_API_BASE / LOLKA_GATEWAY).
+LOLKA_CDN: str = os.environ.get('LOLKA_CDN', 'https://cdn.lolka.app').rstrip('/')
+LOLKA_WEB: str = os.environ.get('LOLKA_WEB', 'https://lolka.app').rstrip('/')
+LOLKA_INVITE: str = os.environ.get('LOLKA_INVITE', 'https://lolka.gg').rstrip('/')
 DEFAULT_FILE_SIZE_LIMIT_BYTES = 10485760
 TIMESTAMP_PATTERN: re.Pattern[str] = re.compile(r'<t:(-?\d+)(?::[tTdDfFsSR])?>')
 
@@ -393,7 +399,7 @@ def oauth_url(
     :class:`str`
         The OAuth2 URL for inviting the bot into guilds.
     """
-    url = f'https://discord.com/oauth2/authorize?client_id={client_id}'
+    url = f'{LOLKA_WEB}/bot-authorize?client_id={client_id}'
     if scopes is not None:
         url += '&scope=' + '+'.join(scopes or ('bot', 'applications.commands'))
     if permissions is not MISSING:
@@ -890,7 +896,7 @@ def resolve_invite(invite: Union[Invite, str]) -> ResolvedInvite:
     Raises
     -------
     ValueError
-        The invite is not a valid Discord invite, e.g. is not a URL
+        The invite is not a valid Lolka invite, e.g. is not a URL
         or does not contain alphanumeric characters.
 
     Returns
@@ -903,12 +909,20 @@ def resolve_invite(invite: Union[Invite, str]) -> ResolvedInvite:
     if isinstance(invite, Invite):
         return ResolvedInvite(invite.code, invite.scheduled_event_id)
     else:
-        rx = r'(?:https?\:\/\/)?discord(?:\.gg|(?:app)?\.com\/invite)\/[^/]+'
-        m = re.match(rx, invite)
+        hosts = '|'.join(
+            [
+                r'lolka\.gg',
+                r'lolka\.app/i',
+                re.escape(re.sub(r'^https?://', '', LOLKA_INVITE)),
+                re.escape(re.sub(r'^https?://', '', LOLKA_WEB)) + '/i',
+            ]
+        )
+        rx = rf'(?:https?://)?(?:{hosts})/[^/?#]+'
+        m = re.match(rx, invite, flags=re.I)
 
         if m:
-            url = yarl.URL(invite)
-            code = url.parts[-1]
+            url = yarl.URL(invite if '://' in invite else f'https://{invite}')
+            code = m.group(0).rsplit('/', 1)[1]
             event_id = url.query.get('event')
 
             return ResolvedInvite(code, int(event_id) if event_id else None)

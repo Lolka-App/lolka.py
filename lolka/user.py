@@ -31,7 +31,7 @@ from .asset import Asset
 from .colour import Colour
 from .enums import DefaultAvatar
 from .flags import PublicUserFlags
-from .utils import snowflake_time, _bytes_to_base64_data, MISSING, _get_as_snowflake, _lolka_default_avatar_index
+from .utils import snowflake_time, _bytes_to_base64_data, MISSING, _get_as_snowflake, _lolka_default_avatar_index, LOLKA_SNOWFLAKE_SHIFT
 from .primary_guild import PrimaryGuild
 from .collectible import Collectible
 
@@ -121,7 +121,7 @@ class BaseUser(_UserTag):
         return not self.__eq__(other)
 
     def __hash__(self) -> int:
-        return self.id >> 22
+        return self.id >> LOLKA_SNOWFLAKE_SHIFT
 
     def _update(self, data: Union[UserPayload, PartialUserPayload]) -> None:
         self.name = data['username']

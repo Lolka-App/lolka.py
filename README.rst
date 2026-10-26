@@ -61,6 +61,20 @@ Bot Example
 
     bot.run('token')
 
+Configuration
+-------------
+
+The defaults point at production lolka. For dev or staging, override them with environment variables:
+
+- ``LOLKA_API_BASE`` — bot API base (default ``https://lolka.app/api/bot``)
+- ``LOLKA_GATEWAY`` — gateway URL (default ``wss://lolka.app/ws/bot``)
+- ``LOLKA_CDN`` — CDN for assets (default ``https://cdn.lolka.app``)
+- ``LOLKA_WEB`` — web client, used for ``jump_url``, ``oauth_url`` and similar links (default ``https://lolka.app``)
+- ``LOLKA_INVITE`` — invite links host (default ``https://lolka.gg``)
+
+The lolka CDN does not resize or convert images (webp only), so ``with_size``, ``with_format`` and
+``replace`` on assets validate their arguments but never change the URL.
+
 Voice
 -----
 

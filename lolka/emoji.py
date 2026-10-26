@@ -25,8 +25,9 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 from typing import Any, Collection, Iterator, List, Optional, TYPE_CHECKING, Tuple
 
-from .asset import Asset, AssetMixin
-from .utils import SnowflakeList, snowflake_time, MISSING
+from .asset import AssetMixin
+from . import utils
+from .utils import SnowflakeList, snowflake_time, MISSING, LOLKA_SNOWFLAKE_SHIFT
 from .partial_emoji import _EmojiTag, PartialEmoji
 from .user import User
 from .errors import MissingApplicationID
@@ -155,7 +156,7 @@ class Emoji(_EmojiTag, AssetMixin):
         return not self.__eq__(other)
 
     def __hash__(self) -> int:
-        return self.id >> 22
+        return self.id >> LOLKA_SNOWFLAKE_SHIFT
 
     @property
     def created_at(self) -> datetime:
@@ -165,8 +166,7 @@ class Emoji(_EmojiTag, AssetMixin):
     @property
     def url(self) -> str:
         """:class:`str`: Returns the URL of the emoji."""
-        end = 'webp?animated=true' if self.animated else 'png'
-        return f'{Asset.BASE}/emojis/{self.id}.{end}'
+        return f'{utils.LOLKA_CDN}/emojis/{self.id}.webp'
 
     @property
     def roles(self) -> List[Role]:

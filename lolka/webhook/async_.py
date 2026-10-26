@@ -39,7 +39,7 @@ import yarl
 from .. import utils
 from ..errors import HTTPException, Forbidden, NotFound, DiscordServerError
 from ..message import Message
-from ..enums import try_enum, WebhookType, ChannelType, DefaultAvatar
+from ..enums import try_enum, WebhookType, ChannelType
 from ..user import BaseUser, User
 from ..flags import MessageFlags
 from ..asset import Asset
@@ -1086,7 +1086,7 @@ class BaseWebhook(Hashable):
 
         .. versionadded:: 2.0
         """
-        return Asset._from_default_avatar(self._state, (self.id >> 22) % len(DefaultAvatar))
+        return Asset._from_default_avatar(self._state, utils._lolka_default_avatar_index(self.id))
 
     @property
     def display_avatar(self) -> Asset:

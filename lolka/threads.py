@@ -34,6 +34,7 @@ from .enums import ChannelType, try_enum
 from .errors import ClientException
 from .flags import ChannelFlags
 from .permissions import Permissions
+from . import utils
 from .utils import MISSING, parse_time, _get_as_snowflake, _unique
 
 __all__ = (
@@ -258,7 +259,7 @@ class Thread(Messageable, Hashable):
 
         .. versionadded:: 2.0
         """
-        return f'https://discord.com/channels/{self.guild.id}/{self.id}'
+        return f'{utils.LOLKA_WEB}/servers/{self.guild.id}/channels/{self.id}'
 
     @property
     def members(self) -> List[ThreadMember]:

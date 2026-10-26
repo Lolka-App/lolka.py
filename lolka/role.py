@@ -275,7 +275,7 @@ class Role(Hashable):
         return not r
 
     def _update(self, data: RolePayload):
-        colors = data.get('colors', {})
+        colors = data.get('colors') or {'primary_color': data.get('color', 0)}
         self.name: str = data['name']
         self._permissions: int = int(data.get('permissions', 0))
         self.position: int = data.get('position', 0)

@@ -92,6 +92,23 @@ __all__ = (
 )
 
 
+def _lolka_link_regex(*, message: bool) -> re.Pattern[str]:
+    # Ссылки на каналы/сообщения Lolka: {WEB}/servers/{g}/channels/{c}[/{m}] и {WEB}/me/channels/{c}[/{m}].
+    # Хост берём в момент вызова, чтобы учитывать LOLKA_WEB.
+    web = re.escape(re.sub(r'^https?://', '', lolka.utils.LOLKA_WEB))
+    if message:
+        return re.compile(
+            rf'(?:https?://)?(?:www\.)?(?:lolka\.app|{web})/(?:servers/(?P<guild_id>[0-9]{{15,20}})|(?P<dm>me))'
+            r'/channels/(?P<channel_id>[0-9]{15,20})/(?P<message_id>[0-9]{15,20})/?$',
+            flags=re.I,
+        )
+    return re.compile(
+        rf'(?:https?://)?(?:www\.)?(?:lolka\.app|{web})/(?:servers/[0-9]{{15,20}}|me)'
+        r'/channels/([0-9]{15,20})(?:/[0-9]{15,20})?/?$',
+        flags=re.I,
+    )
+
+
 def _get_from_guilds(bot: _Bot, getter: str, argument: Any) -> Any:
     result = None
     for guild in bot.guilds:
@@ -365,14 +382,16 @@ class PartialMessageConverter(Converter[lolka.PartialMessage]):
             r'(?P<guild_id>[0-9]{15,20}|@me)'
             r'/(?P<channel_id>[0-9]{15,20})/(?P<message_id>[0-9]{15,20})/?$'
         )
-        match = id_regex.match(argument) or link_regex.match(argument)
+        match = id_regex.match(argument) or _lolka_link_regex(message=True).match(argument) or link_regex.match(argument)
         if not match:
             raise MessageNotFound(argument)
         data = match.groupdict()
         channel_id = lolka.utils._get_as_snowflake(data, 'channel_id') or ctx.channel.id
         message_id = int(data['message_id'])
         guild_id = data.get('guild_id')
-        if guild_id is None:
+        if data.get('dm'):
+            guild_id = None
+        elif guild_id is None:
             guild_id = ctx.guild and ctx.guild.id
         elif guild_id == '@me':
             guild_id = None
@@ -464,7 +483,7 @@ class GuildChannelConverter(IDConverter[lolka.abc.GuildChannel]):
             r'(?:[0-9]{15,20}|@me)'
             r'/([0-9]{15,20})(?:/(?:[0-9]{15,20})/?)?$'
         )
-        return link_regex.match(argument)
+        return _lolka_link_regex(message=False).match(argument) or link_regex.match(argument)
 
     @staticmethod
     def _resolve_channel(ctx: Context[BotT], argument: str, attribute: str, type: Type[CT]) -> CT:
@@ -926,8 +945,7 @@ class ScheduledEventConverter(IDConverter[lolka.ScheduledEvent]):
     The lookup strategy is as follows (in order):
 
     1. Lookup by ID.
-    2. Lookup by url.
-    3. Lookup by name.
+    2. Lookup by name.
 
     .. versionadded:: 2.0
     """
@@ -948,28 +966,14 @@ class ScheduledEventConverter(IDConverter[lolka.ScheduledEvent]):
                     if result:
                         break
         else:
-            pattern = (
-                r'https?://(?:(ptb|canary|www)\.)?discord\.com/events/'
-                r'(?P<guild_id>[0-9]{15,20})/'
-                r'(?P<event_id>[0-9]{15,20})$'
-            )
-            match = re.match(pattern, argument, flags=re.I)
-            if match:
-                # URL match
-                guild = ctx.bot.get_guild(int(match.group('guild_id')))
-
-                if guild:
-                    event_id = int(match.group('event_id'))
-                    result = guild.get_scheduled_event(event_id)
+            # lookup by name (Lolka has no scheduled event pages, so there is no URL form)
+            if guild:
+                result = lolka.utils.get(guild.scheduled_events, name=argument)
             else:
-                # lookup by name
-                if guild:
+                for guild in ctx.bot.guilds:
                     result = lolka.utils.get(guild.scheduled_events, name=argument)
-                else:
-                    for guild in ctx.bot.guilds:
-                        result = lolka.utils.get(guild.scheduled_events, name=argument)
-                        if result:
-                            break
+                    if result:
+                        break
         if result is None:
             raise ScheduledEventNotFound(argument)
 
